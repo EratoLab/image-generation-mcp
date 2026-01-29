@@ -1,13 +1,14 @@
-//! Web Search MCP Server
+//! Image Generation MCP Server
 //!
-//! This binary provides a Model Context Protocol (MCP) server for web search.
-//! It uses Azure AI Search to perform web searches that can be used by AI assistants and other MCP clients.
+//! This binary provides a Model Context Protocol (MCP) server for image generation.
+//! It uses configurable backends to generate images from text prompts.
 
-use web_search_mcp::mcp::BrowserServer;
+use image_generation_mcp::mcp::BrowserServer;
 use clap::{Parser, ValueEnum};
 use log::{debug, info};
 use rmcp::{ServiceExt, transport::stdio};
 use std::io::{stdin, stdout};
+use std::sync::Arc;
 
 #[cfg(feature = "mcp-server")]
 use rmcp::transport::{
@@ -29,33 +30,37 @@ enum Transport {
 }
 
 #[derive(Parser)]
-#[command(name = "web-search-mcp")]
+#[command(name = "image-generation-mcp")]
 #[command(version)]
-#[command(about = "Web Search MCP server using Azure AI Search", long_about = None)]
+#[command(about = "Image Generation MCP server with configurable backends", long_about = None)]
 struct Cli {
-    /// Transport type to use
-    #[arg(long, short = 't', value_enum, default_value = "stdio")]
-    transport: Transport,
+    /// Path to MCP server configuration file
+    #[arg(long, short = 'c')]
+    config: Option<String>,
 
-    /// Port for SSE or HTTP transport (default: 3000)
-    #[arg(long, short = 'p', default_value = "3000")]
-    port: u16,
+    /// Transport type to use (overrides config file)
+    #[arg(long, short = 't', value_enum)]
+    transport: Option<Transport>,
 
-    /// Host address to bind to (default: 127.0.0.1)
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    /// Port for SSE or HTTP transport (overrides config file)
+    #[arg(long, short = 'p')]
+    port: Option<u16>,
 
-    /// SSE endpoint path (default: /sse)
-    #[arg(long, default_value = "/sse")]
-    sse_path: String,
+    /// Host address to bind to (overrides config file)
+    #[arg(long)]
+    host: Option<String>,
 
-    /// SSE POST path for messages (default: /message)
-    #[arg(long, default_value = "/message")]
-    sse_post_path: String,
+    /// SSE endpoint path (overrides config file)
+    #[arg(long)]
+    sse_path: Option<String>,
 
-    /// HTTP streamable endpoint path (default: /mcp)
-    #[arg(long, default_value = "/mcp")]
-    http_path: String,
+    /// SSE POST path for messages (overrides config file)
+    #[arg(long)]
+    sse_post_path: Option<String>,
+
+    /// HTTP streamable endpoint path (overrides config file)
+    #[arg(long)]
+    http_path: Option<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -63,32 +68,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    info!("Web Search MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    info!("Image Generation MCP Server v{}", env!("CARGO_PKG_VERSION"));
 
-    // Check that required environment variables are set
-    let required_vars = [
-        "AZURE_AI_SEARCH_BASE_URL",
-        "AZURE_AI_SEARCH_KB_NAME",
-        "AZURE_AI_SEARCH_KNOWLEDGE_SOURCE_NAME",
-        "AZURE_AI_SEARCH_API_KEY",
-    ];
+    // Load configuration
+    let config = Arc::new(
+        image_generation_mcp::config::ServerConfig::load(cli.config).await?
+    );
 
-    for var in &required_vars {
-        if std::env::var(var).is_err() {
-            return Err(format!("Required environment variable {} is not set", var).into());
+    // Determine final transport settings (CLI overrides config file)
+    let transport_type = cli.transport
+        .map(|t| match t {
+            Transport::Stdio => "stdio".to_string(),
+            Transport::Sse => "sse".to_string(),
+            Transport::Http => "http".to_string(),
+        })
+        .unwrap_or_else(|| config.transport.transport.clone());
+
+    let host = cli.host.unwrap_or_else(|| config.transport.host.clone());
+    let port = cli.port.unwrap_or(config.transport.port);
+    let sse_path = cli.sse_path.unwrap_or_else(|| config.transport.sse_path.clone());
+    let sse_post_path = cli.sse_post_path.unwrap_or_else(|| config.transport.sse_post_path.clone());
+    let http_path = cli.http_path.unwrap_or_else(|| config.transport.http_path.clone());
+
+    info!("Configuration loaded: tool type = {}", match &config.tool {
+        image_generation_mcp::config::ToolSection::Mock(_) => "mock",
+    });
+    info!("Transport: {} ({})", transport_type,
+        match transport_type.as_str() {
+            "stdio" => "standard input/output".to_string(),
+            "sse" => format!("{}:{}", host, port),
+            "http" => format!("{}:{}", host, port),
+            _ => "unknown".to_string(),
         }
-    }
+    );
 
-    info!("Azure AI Search configuration loaded");
+    // Set global config for access by tool handlers
+    image_generation_mcp::config::set_global_config(config).await;
 
     // Route to appropriate transport
-    match cli.transport {
-        Transport::Stdio => {
-            info!("Transport: stdio");
+    match transport_type.as_str() {
+        "stdio" => {
             info!("Ready to accept MCP connections via stdio");
             let (_read, _write) = (stdin(), stdout());
             let service = BrowserServer::new()
-                .map_err(|e| format!("Failed to create web search server: {}", e))?;
+                .map_err(|e| format!("Failed to create image generation server: {}", e))?;
             let server = service.serve(stdio()).await?;
 
             // Set up signal handler for graceful shutdown
@@ -136,49 +159,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 debug!("Server quit with reason: {:?}", quit_reason);
             }
         }
-        Transport::Sse => {
-            info!("Transport: SSE");
-            info!("Host: {}", cli.host);
-            info!("Port: {}", cli.port);
-            info!("SSE path: {}", cli.sse_path);
-            info!("SSE POST path: {}", cli.sse_post_path);
+        "sse" => {
+            info!("Host: {}", host);
+            info!("Port: {}", port);
+            info!("SSE path: {}", sse_path);
+            info!("SSE POST path: {}", sse_post_path);
 
-            let bind_addr = format!("{}:{}", cli.host, cli.port);
+            let bind_addr = format!("{}:{}", host, port);
 
             // Create SSE server configuration
-            let config = SseServerConfig {
+            let sse_config = SseServerConfig {
                 bind: bind_addr.parse()?,
-                sse_path: cli.sse_path.clone(),
-                post_path: cli.sse_post_path.clone(),
+                sse_path: sse_path.clone(),
+                post_path: sse_post_path.clone(),
                 ct: CancellationToken::new(),
                 sse_keep_alive: None,
             };
 
             // Create SSE server and router
-            let (sse_server, router) = SseServer::new(config);
+            let (sse_server, router) = SseServer::new(sse_config);
 
             info!(
                 "Ready to accept MCP connections at http://{}{}",
-                bind_addr, cli.sse_path
+                bind_addr, sse_path
             );
 
             // Register service factory for each connection
             let _cancellation_token = sse_server.with_service(move || {
                 BrowserServer::new()
-                    .expect("Failed to create web search server")
+                    .expect("Failed to create image generation server")
             });
 
             // Start HTTP server with SSE router
             let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
             axum::serve(listener, router.into_make_service()).await?;
         }
-        Transport::Http => {
-            info!("Transport: HTTP streamable");
-            info!("Host: {}", cli.host);
-            info!("Port: {}", cli.port);
-            info!("HTTP path: {}", cli.http_path);
+        "http" => {
+            info!("HTTP streamable");
+            info!("Host: {}", host);
+            info!("Port: {}", port);
+            info!("HTTP path: {}", http_path);
 
-            let bind_addr = format!("{}:{}", cli.host, cli.port);
+            let bind_addr = format!("{}:{}", host, port);
 
             // Create service factory closure
             let service_factory = move || {
@@ -192,15 +214,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Default::default(),
             );
 
-            let router = axum::Router::new().nest_service(&cli.http_path, http_service);
+            let router = axum::Router::new().nest_service(&http_path, http_service);
 
             info!(
                 "Ready to accept MCP connections at http://{}{}",
-                bind_addr, cli.http_path
+                bind_addr, http_path
             );
 
             let listener = tokio::net::TcpListener::bind(bind_addr).await?;
             axum::serve(listener, router).await?;
+        }
+        _ => {
+            return Err(format!("Invalid transport type: {}", transport_type).into());
         }
     }
 

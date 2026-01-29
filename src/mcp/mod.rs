@@ -1,4 +1,4 @@
-//! MCP (Model Context Protocol) server implementation for browser automation
+//! MCP (Model Context Protocol) server implementation for image generation
 //!
 //! This module provides rmcp-compatible tools by wrapping the existing tool implementations.
 
@@ -14,13 +14,21 @@ use rmcp::{
 };
 
 /// Convert internal ToolResult to MCP CallToolResult
-fn convert_result(result: InternalToolResult) -> Result<CallToolResult, McpError> {
+fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolResult, McpError> {
     if result.success {
         let text = if let Some(data) = result.data {
             serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
         } else {
             "Success".to_string()
         };
+
+        // Log metadata with prefix for debugging
+        if !result.metadata.is_empty() {
+            log::debug!("Tool metadata (prefix: {}): {:?}", prefix, result.metadata);
+        }
+
+        // Return simple text response for now
+        // TODO: Explore proper _meta field support in rmcp 0.8.5
         Ok(CallToolResult::success(vec![Content::text(text)]))
     } else {
         let error_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
@@ -44,7 +52,12 @@ macro_rules! register_mcp_tools {
                     let result = tool.execute_typed(params.0, &mut context)
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                    convert_result(result)
+
+                    // Get metadata prefix from global config
+                    let config = crate::config::get_global_config().await;
+                    let prefix = config.metadata.prefix.as_str();
+
+                    convert_result(result, prefix)
                 }
             )*
         }
@@ -53,5 +66,5 @@ macro_rules! register_mcp_tools {
 
 // Register all MCP tools using the macro
 register_mcp_tools! {
-    web_search => tools::web_search::WebSearchTool, "Perform a web search using Azure AI Search. Returns search results with response text and references.";
+    generate_image => tools::image_generation::ImageGenerationTool, "Generate images from text prompts. Returns base64-encoded image data URIs.";
 }

@@ -1,34 +1,38 @@
-//! # web-search-mcp
+//! # image-generation-mcp
 //!
-//! A Model Context Protocol (MCP) server for web search using Azure AI Search.
+//! A Model Context Protocol (MCP) server for image generation with configurable backends.
 //!
 //! ## Features
 //!
-//! - **MCP Server**: Model Context Protocol server for web search
-//! - **Azure AI Search Integration**: Uses Azure AI Search knowledge bases for web search
-//! - **Simple Configuration**: Configure via environment variables
+//! - **MCP Server**: Model Context Protocol server for image generation
+//! - **Configurable Backends**: Switch between image generation providers via TOML configuration
+//! - **Token Usage Tracking**: Built-in tracking with `_meta` fields
+//! - **Simple Configuration**: Configure via TOML file or environment variables
 //!
 //! ## MCP Server
 //!
 //! ### Running the MCP Server
 //!
 //! ```bash
-//! # Set required environment variables
-//! export AZURE_AI_SEARCH_BASE_URL="https://your-search.search.windows.net"
-//! export AZURE_AI_SEARCH_KB_NAME="your-kb-name"
-//! export AZURE_AI_SEARCH_KNOWLEDGE_SOURCE_NAME="web-search"
-//! export AZURE_AI_SEARCH_API_KEY="your-api-key"
+//! # Using default config path (./mcp-server.toml)
+//! cargo run --bin mcp-server
 //!
-//! # Run the server
+//! # Using custom config path
+//! cargo run --bin mcp-server -- --config /path/to/config.toml
+//!
+//! # Using environment variable
+//! export MCP_SERVER_CONFIG=/path/to/config.toml
 //! cargo run --bin mcp-server
 //! ```
 //!
 //! ## Module Overview
 //!
-//! - [`tools`]: Web search tools
+//! - [`config`]: Configuration management
+//! - [`tools`]: Image generation tools
 //! - [`error`]: Error types and result aliases
 //! - [`mcp`]: **Model Context Protocol server** (requires `mcp-handler` feature)
 
+pub mod config;
 pub mod error;
 pub mod tools;
 

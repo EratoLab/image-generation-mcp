@@ -1,11 +1,11 @@
-//! Web search tools module
+//! Image generation tools module
 //!
-//! This module provides tools for web search operations.
+//! This module provides tools for image generation operations.
 
-pub mod web_search;
+pub mod image_generation;
 
 // Re-export Params types for use by MCP layer
-pub use web_search::WebSearchParams;
+pub use image_generation::ImageGenerationParams;
 
 use crate::error::Result;
 use serde_json::Value;
@@ -157,8 +157,8 @@ impl ToolRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
 
-        // Register the web_search tool
-        registry.register(web_search::WebSearchTool);
+        // Register the generate_image tool
+        registry.register(image_generation::ImageGenerationTool);
 
         registry
     }

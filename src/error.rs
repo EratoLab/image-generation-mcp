@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Core error type for web search operations
+/// Core error type for image generation operations
 #[derive(Error, Debug)]
 pub enum BrowserError {
     /// Tool execution failed
@@ -11,6 +11,10 @@ pub enum BrowserError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     /// JSON serialization/deserialization error
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
@@ -20,5 +24,5 @@ pub enum BrowserError {
     IoError(#[from] std::io::Error),
 }
 
-/// Result type alias for web search operations
+/// Result type alias for image generation operations
 pub type Result<T> = std::result::Result<T, BrowserError>;

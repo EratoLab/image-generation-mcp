@@ -1,14 +1,14 @@
 [package]
-name = "web-search-mcp"
+name = "image-generation-mcp"
 version = "0.1.0"
 edition = "2024"
 authors = ["EratoLab"]
-description = "A Model Context Protocol (MCP) server for web search using Azure AI Search"
+description = "A Model Context Protocol (MCP) server for image generation with configurable backends"
 license = "MIT"
-repository = "https://github.com/EratoLab/web-search-mcp"
+repository = "https://github.com/EratoLab/image-generation-mcp"
 readme = "README.md"
-keywords = ["web", "search", "mcp", "azure", "ai-search"]
-categories = ["web-programming", "api-bindings"]
+keywords = ["image", "generation", "mcp", "ai", "configurable"]
+categories = ["multimedia", "api-bindings"]
 
 [[bin]]
 name = "mcp-server"
@@ -45,9 +45,13 @@ tokio = { version = "1", features = [
     "sync",
     "net",
     "signal",
+    "fs",
 ], optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 axum = { version = "0.8", optional = true }
 tokio-util = { version = "0.7", optional = true }
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
+toml = "0.8"
+base64 = "0.22"
+mime_guess = "2.0"
