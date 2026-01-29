@@ -11,20 +11,15 @@ use std::io::{stdin, stdout};
 use std::sync::Arc;
 
 #[cfg(feature = "mcp-server")]
-use rmcp::transport::{
-    sse_server::{SseServer, SseServerConfig},
-    streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager},
-};
+use rmcp::transport::streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager};
 
 #[cfg(feature = "mcp-server")]
-use tokio_util::sync::CancellationToken;
+use tokio::net::TcpListener;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Transport {
     /// Standard input/output transport (default)
     Stdio,
-    /// Server-Sent Events transport
-    Sse,
     /// HTTP streamable transport
     Http,
 }
@@ -42,21 +37,13 @@ struct Cli {
     #[arg(long, short = 't', value_enum)]
     transport: Option<Transport>,
 
-    /// Port for SSE or HTTP transport (overrides config file)
+    /// Port for HTTP transport (overrides config file)
     #[arg(long, short = 'p')]
     port: Option<u16>,
 
     /// Host address to bind to (overrides config file)
     #[arg(long)]
     host: Option<String>,
-
-    /// SSE endpoint path (overrides config file)
-    #[arg(long)]
-    sse_path: Option<String>,
-
-    /// SSE POST path for messages (overrides config file)
-    #[arg(long)]
-    sse_post_path: Option<String>,
 
     /// HTTP streamable endpoint path (overrides config file)
     #[arg(long)]
@@ -79,15 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport_type = cli.transport
         .map(|t| match t {
             Transport::Stdio => "stdio".to_string(),
-            Transport::Sse => "sse".to_string(),
             Transport::Http => "http".to_string(),
         })
         .unwrap_or_else(|| config.transport.transport.clone());
 
     let host = cli.host.unwrap_or_else(|| config.transport.host.clone());
     let port = cli.port.unwrap_or(config.transport.port);
-    let sse_path = cli.sse_path.unwrap_or_else(|| config.transport.sse_path.clone());
-    let sse_post_path = cli.sse_post_path.unwrap_or_else(|| config.transport.sse_post_path.clone());
     let http_path = cli.http_path.unwrap_or_else(|| config.transport.http_path.clone());
 
     info!("Configuration loaded: tool type = {}", match &config.tool {
@@ -96,8 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Transport: {} ({})", transport_type,
         match transport_type.as_str() {
             "stdio" => "standard input/output".to_string(),
-            "sse" => format!("{}:{}", host, port),
-            "http" => format!("{}:{}", host, port),
+            "http" => format!("http://{}:{}", host, port),
             _ => "unknown".to_string(),
         }
     );
@@ -159,41 +142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 debug!("Server quit with reason: {:?}", quit_reason);
             }
         }
-        "sse" => {
-            info!("Host: {}", host);
-            info!("Port: {}", port);
-            info!("SSE path: {}", sse_path);
-            info!("SSE POST path: {}", sse_post_path);
-
-            let bind_addr = format!("{}:{}", host, port);
-
-            // Create SSE server configuration
-            let sse_config = SseServerConfig {
-                bind: bind_addr.parse()?,
-                sse_path: sse_path.clone(),
-                post_path: sse_post_path.clone(),
-                ct: CancellationToken::new(),
-                sse_keep_alive: None,
-            };
-
-            // Create SSE server and router
-            let (sse_server, router) = SseServer::new(sse_config);
-
-            info!(
-                "Ready to accept MCP connections at http://{}{}",
-                bind_addr, sse_path
-            );
-
-            // Register service factory for each connection
-            let _cancellation_token = sse_server.with_service(move || {
-                BrowserServer::new()
-                    .expect("Failed to create image generation server")
-            });
-
-            // Start HTTP server with SSE router
-            let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-            axum::serve(listener, router.into_make_service()).await?;
-        }
         "http" => {
             info!("HTTP streamable");
             info!("Host: {}", host);
@@ -221,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bind_addr, http_path
             );
 
-            let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+            let listener = TcpListener::bind(&bind_addr).await?;
             axum::serve(listener, router).await?;
         }
         _ => {

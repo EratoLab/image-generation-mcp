@@ -31,7 +31,7 @@ pub struct ServerSection {
 /// Transport configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportConfig {
-    /// Transport type: stdio, sse, or http
+    /// Transport type: stdio or http
     #[serde(default = "default_transport_type")]
     pub transport: String,
 
@@ -39,17 +39,9 @@ pub struct TransportConfig {
     #[serde(default = "default_host")]
     pub host: String,
 
-    /// Port for SSE or HTTP transport
+    /// Port for HTTP transport
     #[serde(default = "default_port")]
     pub port: u16,
-
-    /// SSE endpoint path
-    #[serde(default = "default_sse_path")]
-    pub sse_path: String,
-
-    /// SSE POST path for messages
-    #[serde(default = "default_sse_post_path")]
-    pub sse_post_path: String,
 
     /// HTTP streamable endpoint path
     #[serde(default = "default_http_path")]
@@ -68,14 +60,6 @@ fn default_port() -> u16 {
     3000
 }
 
-fn default_sse_path() -> String {
-    "/sse".to_string()
-}
-
-fn default_sse_post_path() -> String {
-    "/message".to_string()
-}
-
 fn default_http_path() -> String {
     "/mcp".to_string()
 }
@@ -86,8 +70,6 @@ impl Default for TransportConfig {
             transport: default_transport_type(),
             host: default_host(),
             port: default_port(),
-            sse_path: default_sse_path(),
-            sse_post_path: default_sse_post_path(),
             http_path: default_http_path(),
         }
     }
@@ -213,7 +195,7 @@ impl ServerConfig {
         }
 
         // Validate transport type
-        let valid_transports = ["stdio", "sse", "http"];
+        let valid_transports = ["stdio", "http"];
         if !valid_transports.contains(&self.transport.transport.as_str()) {
             return Err(BrowserError::ConfigError(format!(
                 "Invalid transport type: '{}'. Must be one of: {}",

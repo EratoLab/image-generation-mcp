@@ -86,34 +86,31 @@ prefix = "chat.erato/"  # Prefix for token usage metadata fields
 # Transport configuration
 # All settings can be overridden via CLI arguments
 [transport]
-# Transport type: "stdio", "sse", or "http"
+# Transport type: "stdio" or "http"
 transport = "stdio"
 
-# For SSE and HTTP transports:
+# For HTTP transport:
 # host = "127.0.0.1"
 # port = 3000
-# sse_path = "/sse"
-# sse_post_path = "/message"
 # http_path = "/mcp"
 ```
 
 ### Transport Configuration
 
-The server supports three transport types that can be configured in the TOML file or overridden via CLI arguments:
+The server supports two transport types that can be configured in the TOML file or overridden via CLI arguments:
 
 **Transport Types:**
 - **stdio** (default): Standard input/output for local communication
-- **sse**: Server-Sent Events for web-based connections
-- **http**: HTTP streamable transport
+- **http**: HTTP streamable transport for web-based connections
 
 **Configuration Priority:**
 CLI arguments > Config file settings > Defaults
 
 Example with CLI override:
 ```bash
-# Config file has transport = "stdio", but CLI overrides to SSE
+# Config file has transport = "stdio", but CLI overrides to HTTP
 cargo run --release --features mcp-server --bin mcp-server -- \
-  --transport sse \
+  --transport http \
   --host 0.0.0.0 \
   --port 3000
 ```
@@ -240,15 +237,13 @@ All CLI options override values from the configuration file:
 
 ```bash
 Options:
-  -c, --config <PATH>         Path to MCP server configuration file
-  -t, --transport <TYPE>      Transport type (overrides config): stdio, sse, http
-  -p, --port <PORT>          Port for SSE or HTTP transport (overrides config)
-      --host <HOST>          Host address to bind to (overrides config)
-      --sse-path <PATH>      SSE endpoint path (overrides config)
-      --sse-post-path <PATH> SSE POST path for messages (overrides config)
-      --http-path <PATH>     HTTP streamable endpoint path (overrides config)
-  -h, --help                 Print help
-  -V, --version              Print version
+  -c, --config <CONFIG>         Path to MCP server configuration file
+  -t, --transport <TRANSPORT>    Transport type (overrides config): stdio, http
+  -p, --port <PORT>             Port for HTTP transport (overrides config)
+      --host <HOST>             Host address to bind to (overrides config)
+      --http-path <PATH>        HTTP streamable endpoint path (overrides config)
+  -h, --help                    Print help
+  -V, --version                 Print version
 ```
 
 **Example:**
@@ -256,9 +251,9 @@ Options:
 # Use transport from config file (stdio)
 cargo run --release --features mcp-server --bin mcp-server
 
-# Override config file transport with SSE
+# Override config file transport with HTTP
 cargo run --release --features mcp-server --bin mcp-server -- \
-  --transport sse --host 0.0.0.0 --port 4000
+  --transport http --host 0.0.0.0 --port 4000
 ```
 
 ## Docker

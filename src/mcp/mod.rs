@@ -9,9 +9,10 @@ use crate::tools::{self, Tool, ToolContext, ToolResult as InternalToolResult};
 use rmcp::{
     ErrorData as McpError,
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content},
+    model::{CallToolResult, Content, Meta},
     tool, tool_router,
 };
+use serde_json::json;
 
 /// Convert internal ToolResult to MCP CallToolResult
 fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolResult, McpError> {
@@ -22,14 +23,27 @@ fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolRe
             "Success".to_string()
         };
 
-        // Log metadata with prefix for debugging
-        if !result.metadata.is_empty() {
-            log::debug!("Tool metadata (prefix: {}): {:?}", prefix, result.metadata);
-        }
+        // Build metadata map with prefix
+        let meta_map: Option<Meta> = if !result.metadata.is_empty() {
+            let mut meta_obj = serde_json::Map::new();
+            for (key, value) in result.metadata {
+                let meta_key = format!("{}{}", prefix, key);
+                if let Ok(obj) = serde_json::to_value(value) {
+                    meta_obj.insert(meta_key, obj);
+                }
+            }
+            Some(Meta(meta_obj))
+        } else {
+            None
+        };
 
-        // Return simple text response for now
-        // TODO: Explore proper _meta field support in rmcp 0.8.5
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        // Create result with meta
+        Ok(CallToolResult {
+            content: vec![Content::text(text)],
+            structured_content: None,
+            is_error: Some(false),
+            meta: meta_map,
+        })
     } else {
         let error_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
         Err(McpError::internal_error(error_msg, None))
