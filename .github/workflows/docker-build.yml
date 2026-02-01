@@ -22,7 +22,7 @@ on:
 
 env:
   REGISTRY: harbor.imassage.me
-  IMAGE_NAME: erato/web-search-mcp
+  IMAGE_NAME: erato/image-generation-mcp
   SHA_TAG: ${{ github.sha }}
   RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
