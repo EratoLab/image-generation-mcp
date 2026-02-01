@@ -12,15 +12,15 @@ use rmcp::{
     model::{CallToolResult, Content, Meta},
     tool, tool_router,
 };
-use serde_json::json;
 
 /// Convert internal ToolResult to MCP CallToolResult
 fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolResult, McpError> {
     if result.success {
-        let text = if let Some(data) = result.data {
-            serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+        let (text, structured_content) = if let Some(data) = result.data {
+            let text = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
+            (text, Some(data))
         } else {
-            "Success".to_string()
+            ("Success".to_string(), None)
         };
 
         // Build metadata map with prefix
@@ -40,7 +40,7 @@ fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolRe
         // Create result with meta
         Ok(CallToolResult {
             content: vec![Content::text(text)],
-            structured_content: None,
+            structured_content,
             is_error: Some(false),
             meta: meta_map,
         })
@@ -52,11 +52,11 @@ fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolRe
 
 /// Macro to register MCP tools by automatically generating wrapper functions
 macro_rules! register_mcp_tools {
-    ($($mcp_name:ident => $tool_type:ty, $description:expr);* $(;)?) => {
+    ($($mcp_name:ident => $tool_type:ty, $description:expr $(, output_schema = $output_schema:expr)?);* $(;)?) => {
         #[tool_router]
         impl BrowserServer {
             $(
-                #[tool(description = $description)]
+                #[tool(description = $description $(, output_schema = $output_schema)?)]
                 async fn $mcp_name(
                     &self,
                     params: Parameters<<$tool_type as Tool>::Params>,
@@ -80,5 +80,7 @@ macro_rules! register_mcp_tools {
 
 // Register all MCP tools using the macro
 register_mcp_tools! {
-    generate_image => tools::image_generation::ImageGenerationTool, "Generate images from text prompts. Returns base64-encoded image data URIs.";
+    generate_image => tools::image_generation::ImageGenerationTool,
+        "Generate images from text prompts. Returns base64-encoded image data in the data_base64 field (no data URI prefix).",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::image_generation::ImageGenerationResponse>();
 }

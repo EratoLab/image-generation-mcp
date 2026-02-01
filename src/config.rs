@@ -80,6 +80,7 @@ impl Default for TransportConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolSection {
     Mock(MockToolConfig),
+    GenAi(GenAiToolConfig),
     // Future backends can be added here:
     // OpenAI(OpenAIToolConfig),
     // StabilityAI(StabilityAIToolConfig),
@@ -89,6 +90,114 @@ pub enum ToolSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MockToolConfig {
     pub static_image_path: String,
+}
+
+/// GenAI-backed tool configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenAiToolConfig {
+    /// openai, azure_openai, or ollama
+    pub provider_kind: String,
+    pub model_name: String,
+    pub model_display_name: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub api_version: Option<String>,
+    pub additional_request_parameters: Option<Vec<String>>,
+    pub additional_request_headers: Option<Vec<String>>,
+    pub image_quality: Option<String>,
+    pub image_style: Option<String>,
+    pub response_format: Option<String>,
+}
+
+impl GenAiToolConfig {
+    /// Parses additional_request_parameters into key/value pairs.
+    pub fn additional_request_parameters_map(&self) -> std::collections::HashMap<String, String> {
+        let mut params = std::collections::HashMap::new();
+        if let Some(param_vec) = &self.additional_request_parameters {
+            for param in param_vec {
+                if let Some((key, value)) = param.split_once('=') {
+                    params.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+        params
+    }
+
+    /// Parses additional_request_headers into key/value pairs.
+    pub fn additional_request_headers_map(&self) -> std::collections::HashMap<String, String> {
+        let mut headers = std::collections::HashMap::new();
+        if let Some(header_vec) = &self.additional_request_headers {
+            for header in header_vec {
+                if let Some((key, value)) = header.split_once('=') {
+                    headers.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+        headers
+    }
+
+    /// Migrates azure_openai configuration to openai format.
+    pub fn migrate_azure_openai_to_openai(self) -> Result<Self> {
+        if self.provider_kind != "azure_openai" {
+            return Ok(self);
+        }
+
+        let base_url = if let Some(url) = &self.base_url {
+            let trimmed_url = url.trim_end_matches('/');
+
+            if !trimmed_url.contains(".api.cognitive.microsoft.com")
+                && !trimmed_url.contains(".openai.azure.com")
+                && !trimmed_url.contains(".cognitiveservices.azure.com")
+                && !trimmed_url.contains(".services.ai.azure.com")
+            {
+                return Err(BrowserError::ConfigError(format!(
+                    "Azure OpenAI base_url must end with either '.api.cognitive.microsoft.com', '.openai.azure.com', '.cognitiveservices.azure.com', or '.services.ai.azure.com' got: {}",
+                    url
+                )));
+            }
+
+            Some(format!(
+                "{}/openai/deployments/{}/",
+                trimmed_url, self.model_name
+            ))
+        } else {
+            return Err(BrowserError::ConfigError(
+                "base_url is required for azure_openai provider".to_string(),
+            ));
+        };
+
+        let mut additional_params = self.additional_request_parameters.unwrap_or_default();
+        if let Some(api_version) = &self.api_version {
+            additional_params.push(format!("api-version={}", api_version));
+        }
+
+        let mut additional_headers = self.additional_request_headers.unwrap_or_default();
+        if let Some(api_key) = &self.api_key {
+            additional_headers.push(format!("api-key={}", api_key));
+        }
+
+        Ok(GenAiToolConfig {
+            provider_kind: "openai".to_string(),
+            model_name: self.model_name,
+            model_display_name: self.model_display_name,
+            base_url,
+            api_key: None,
+            api_version: None,
+            additional_request_parameters: if additional_params.is_empty() {
+                None
+            } else {
+                Some(additional_params)
+            },
+            additional_request_headers: if additional_headers.is_empty() {
+                None
+            } else {
+                Some(additional_headers)
+            },
+            image_quality: self.image_quality,
+            image_style: self.image_style,
+            response_format: self.response_format,
+        })
+    }
 }
 
 /// Metadata configuration
@@ -124,6 +233,8 @@ impl ServerConfig {
 
         let config: ServerConfig = toml::from_str(&content)
             .map_err(|e| BrowserError::ConfigError(format!("Failed to parse config file {}: {}", config_path.display(), e)))?;
+
+        let config = config.migrate_tool_config()?;
 
         // Validate configuration
         config.validate()?;
@@ -179,6 +290,8 @@ impl ServerConfig {
         let config: ServerConfig = toml::from_str(&content)
             .map_err(|e| BrowserError::ConfigError(format!("Failed to parse config file {}: {}", path.display(), e)))?;
 
+        let config = config.migrate_tool_config()?;
+
         // Validate configuration
         config.validate()?;
 
@@ -213,9 +326,32 @@ impl ServerConfig {
                     ));
                 }
             }
+            ToolSection::GenAi(genai_config) => {
+                let valid_providers = ["openai", "azure_openai", "ollama"];
+                if !valid_providers.contains(&genai_config.provider_kind.as_str()) {
+                    return Err(BrowserError::ConfigError(format!(
+                        "Invalid genai provider_kind: '{}'. Must be one of: {}",
+                        genai_config.provider_kind,
+                        valid_providers.join(", ")
+                    )));
+                }
+                if genai_config.model_name.trim().is_empty() {
+                    return Err(BrowserError::ConfigError(
+                        "GenAI tool model_name cannot be empty".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// Migrate tool configuration for backwards-compatible provider aliases.
+    fn migrate_tool_config(mut self) -> Result<Self> {
+        if let ToolSection::GenAi(genai_config) = self.tool.clone() {
+            self.tool = ToolSection::GenAi(genai_config.migrate_azure_openai_to_openai()?);
+        }
+        Ok(self)
     }
 }
 
@@ -264,6 +400,7 @@ mod tests {
             ToolSection::Mock(mock) => {
                 assert_eq!(mock.static_image_path, "static/image_1.png");
             }
+            ToolSection::GenAi(_) => panic!("Expected mock tool config"),
         }
     }
 

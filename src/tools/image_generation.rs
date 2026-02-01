@@ -17,7 +17,19 @@ use crate::error::BrowserError;
 use base64::Engine;
 
 #[cfg(feature = "mcp-server")]
+use genai::adapter::AdapterKind;
+#[cfg(feature = "mcp-server")]
+use genai::chat::{BinarySource, ContentPart, ImageRequest};
+#[cfg(feature = "mcp-server")]
+use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+#[cfg(feature = "mcp-server")]
+use genai::{Client as GenaiClient, ModelIden, ServiceTarget};
+#[cfg(feature = "mcp-server")]
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+#[cfg(feature = "mcp-server")]
 use std::path::Path;
+#[cfg(feature = "mcp-server")]
+use std::str::FromStr;
 
 /// Image generation tool
 #[derive(Debug, Default)]
@@ -64,16 +76,20 @@ pub struct TokenUsage {
 }
 
 /// Generated image response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GeneratedImage {
-    pub data_uri: String,
+    #[schemars(extend(
+        "contentEncoding" = "base64",
+        "chat.erato/file_content_field" = true
+    ))]
+    pub data_base64: String,
     pub width: u32,
     pub height: u32,
     pub mime_type: String,
 }
 
 /// Response wrapper for generated images
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageGenerationResponse {
     pub images: Vec<GeneratedImage>,
 }
@@ -87,27 +103,39 @@ impl Tool for ImageGenerationTool {
     }
 
     async fn execute_typed(&self, params: Self::Params, _context: &mut ToolContext<'_>) -> Result<ToolResult> {
-        // Calculate token usage (mock approximation)
-        let token_usage = TokenUsage {
-            total_prompt_tokens: (params.prompt.len() as u64) * 4,
-            total_completion_tokens: 0,
-            total_tokens: (params.prompt.len() as u64) * 4,
-            model_identifier: "mock/v1".to_string(),
-        };
-
         // Execute based on tool type
         #[cfg(feature = "mcp-server")]
-        let result = {
+        let (result, token_usage) = {
             let config = crate::config::get_global_config().await;
             match &config.tool {
-                ToolSection::Mock(mock_config) => self.execute_mock(&params, mock_config).await?,
+                ToolSection::Mock(mock_config) => {
+                    let result = self.execute_mock(&params, mock_config).await?;
+                    let token_usage = TokenUsage {
+                        total_prompt_tokens: (params.prompt.len() as u64) * 4,
+                        total_completion_tokens: 0,
+                        total_tokens: (params.prompt.len() as u64) * 4,
+                        model_identifier: "mock/v1".to_string(),
+                    };
+                    (result, token_usage)
+                }
+                ToolSection::GenAi(genai_config) => {
+                    self.execute_genai(&params, genai_config).await?
+                }
             }
         };
 
         #[cfg(not(feature = "mcp-server"))]
-        let result = ToolResult::success(Some(serde_json::json!({
-            "message": "Tool execution requires mcp-server feature"
-        })));
+        let (result, token_usage) = (
+            ToolResult::success(Some(serde_json::json!({
+                "message": "Tool execution requires mcp-server feature"
+            }))),
+            TokenUsage {
+                total_prompt_tokens: 0,
+                total_completion_tokens: 0,
+                total_tokens: 0,
+                model_identifier: "none".to_string(),
+            },
+        );
 
         // Add token usage metadata
         let token_meta = json!({
@@ -158,12 +186,9 @@ impl ImageGenerationTool {
         // Encode to base64
         let base64_data = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
 
-        // Create data URI
-        let data_uri = format!("data:{};base64,{}", mime_type, base64_data);
-
         // Build response
         let image = GeneratedImage {
-            data_uri,
+            data_base64: base64_data,
             width,
             height,
             mime_type,
@@ -174,6 +199,197 @@ impl ImageGenerationTool {
         };
 
         Ok(ToolResult::success_with(response))
+    }
+
+    #[cfg(feature = "mcp-server")]
+    async fn execute_genai(
+        &self,
+        params: &ImageGenerationParams,
+        genai_config: &crate::config::GenAiToolConfig,
+    ) -> Result<(ToolResult, TokenUsage)> {
+        let client = Self::build_genai_client(genai_config)?;
+
+        let width = params.width.unwrap_or(1024);
+        let height = params.height.unwrap_or(1024);
+        let num_images = params.num_images.unwrap_or(1);
+        if num_images > i32::MAX as u32 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images is too large".to_string(),
+            ));
+        }
+
+        let mut image_request = ImageRequest::from_prompt(&params.prompt)
+            .with_n(num_images as i32)
+            .with_size(format!("{}x{}", width, height));
+
+        if let Some(quality) = &genai_config.image_quality {
+            image_request = image_request.with_quality(quality.clone());
+        }
+        if let Some(style) = &genai_config.image_style {
+            image_request = image_request.with_style(style.clone());
+        }
+        let response_format = genai_config
+            .response_format
+            .clone()
+            .unwrap_or_else(|| "b64_json".to_string());
+        image_request = image_request.with_response_format(response_format);
+
+        let image_response = client
+            .exec_image_generation(&genai_config.model_name, image_request, None)
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("GenAI image generation failed: {}", e),
+            })?;
+
+        let mut images = Vec::new();
+        for part in image_response.images {
+            let ContentPart::Binary(binary) = part else {
+                return Err(BrowserError::ToolExecutionFailed {
+                    tool: self.name().to_string(),
+                    reason: "Unexpected non-binary image content in provider response".to_string(),
+                });
+            };
+
+            let data_base64 = match binary.source {
+                BinarySource::Base64(base64_data) => base64_data.to_string(),
+                BinarySource::Url(_) => {
+                    return Err(BrowserError::ToolExecutionFailed {
+                        tool: self.name().to_string(),
+                        reason: "Provider returned image URL; expected base64 content".to_string(),
+                    });
+                }
+            };
+
+            images.push(GeneratedImage {
+                data_base64,
+                width,
+                height,
+                mime_type: binary.content_type,
+            });
+        }
+
+        if images.is_empty() {
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: "No images were generated".to_string(),
+            });
+        }
+
+        let usage = image_response.usage.clone();
+        let token_usage = TokenUsage {
+            total_prompt_tokens: usage
+                .as_ref()
+                .and_then(|u| u.prompt_tokens)
+                .unwrap_or(0)
+                .max(0) as u64,
+            total_completion_tokens: usage
+                .as_ref()
+                .and_then(|u| u.completion_tokens)
+                .unwrap_or(0)
+                .max(0) as u64,
+            total_tokens: usage
+                .as_ref()
+                .and_then(|u| u.total_tokens)
+                .unwrap_or(0)
+                .max(0) as u64,
+            model_identifier: image_response.model_iden.to_string(),
+        };
+
+        let response = ImageGenerationResponse { images };
+        Ok((ToolResult::success_with(response), token_usage))
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn build_genai_client(
+        config: &crate::config::GenAiToolConfig,
+    ) -> Result<GenaiClient> {
+        let base_url = config.base_url.clone();
+        let request_params = config.additional_request_parameters_map();
+        let request_headers = config.additional_request_headers_map();
+
+        let mut header_map = HeaderMap::new();
+        for (key, value) in request_headers {
+            let name = HeaderName::from_str(&key).map_err(|e| {
+                BrowserError::ConfigError(format!("Invalid header name '{}': {}", key, e))
+            })?;
+            let value = HeaderValue::from_str(&value).map_err(|e| {
+                BrowserError::ConfigError(format!("Invalid header value for '{}': {}", key, e))
+            })?;
+            header_map.insert(name, value);
+        }
+
+        let custom_client = reqwest::ClientBuilder::new()
+            .default_headers(header_map)
+            .build()
+            .map_err(|e| BrowserError::ConfigError(format!("Failed to build HTTP client: {}", e)))?;
+
+        let provider_kind = config.provider_kind.clone();
+        let model_name = config.model_name.clone();
+        let api_key = config.api_key.clone();
+
+        let genai_client = genai::ClientBuilder::default()
+            .with_reqwest(custom_client)
+            .with_service_target_resolver(ServiceTargetResolver::from_resolver_fn(
+                move |_service_target: ServiceTarget| -> std::result::Result<ServiceTarget, genai::resolver::Error> {
+                    let adapter_kind = match provider_kind.as_str() {
+                        "ollama" => AdapterKind::Ollama,
+                        "openai" => AdapterKind::OpenAI,
+                        _ => {
+                            return Err(genai::resolver::Error::Custom(
+                                "Unknown provider kind".to_string(),
+                            ));
+                        }
+                    };
+
+                    let mut endpoint = Self::default_endpoint(adapter_kind);
+                    if let Some(base_url) = base_url.clone() {
+                        let mut url_str = base_url;
+                        if !request_params.is_empty() {
+                            let mut first_param = true;
+                            for (key, value) in &request_params {
+                                if first_param {
+                                    if url_str.contains('?') {
+                                        url_str.push('&');
+                                    } else {
+                                        url_str.push('?');
+                                    }
+                                    first_param = false;
+                                } else {
+                                    url_str.push('&');
+                                }
+                                url_str.push_str(&format!("{}={}", key, value));
+                            }
+                        }
+                        endpoint = Endpoint::from_owned(url_str);
+                    }
+
+                    let auth = if let Some(api_key) = api_key.clone() {
+                        AuthData::from_single(api_key)
+                    } else {
+                        AuthData::from_single("PLACEHOLDER")
+                    };
+
+                    let model = ModelIden::new(adapter_kind, model_name.clone());
+                    Ok(ServiceTarget {
+                        endpoint,
+                        auth,
+                        model,
+                    })
+                },
+            ))
+            .build();
+
+        Ok(genai_client)
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn default_endpoint(kind: AdapterKind) -> Endpoint {
+        match kind {
+            AdapterKind::OpenAI => Endpoint::from_static("https://api.openai.com/v1/"),
+            AdapterKind::Ollama => Endpoint::from_static("http://localhost:11434/v1/"),
+            _ => Endpoint::from_static("https://api.openai.com/v1/"),
+        }
     }
 }
 

@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Configuration loaded: tool type = {}", match &config.tool {
         image_generation_mcp::config::ToolSection::Mock(_) => "mock",
+        image_generation_mcp::config::ToolSection::GenAi(_) => "genai",
     });
     info!("Transport: {} ({})", transport_type,
         match transport_type.as_str() {

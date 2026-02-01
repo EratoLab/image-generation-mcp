@@ -31,3 +31,4 @@ tests/
 # Environment files
 .env
 .env.*
+mcp-server.local.toml

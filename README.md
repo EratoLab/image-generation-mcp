@@ -29,8 +29,6 @@ version = "0.1.0"
 
 [tool]
 type = "mock"
-
-[tool.mock]
 static_image_path = "static/image_1.png"
 
 [metadata]
@@ -74,10 +72,7 @@ name = "image-generation-mcp"
 version = "0.1.0"
 
 [tool]
-type = "mock"  # Backend type: mock, openai, stability-ai, etc.
-
-# Mock backend configuration
-[tool.mock]
+type = "mock"  # Backend type: mock or gen_ai
 static_image_path = "static/image_1.png"
 
 [metadata]
@@ -123,9 +118,23 @@ Returns a static image file. Useful for testing and development.
 ```toml
 [tool]
 type = "mock"
-
-[tool.mock]
 static_image_path = "path/to/image.png"
+```
+
+#### GenAI Backend (OpenAI / Azure OpenAI-compatible / Ollama)
+Uses the forked `genai` client for real image generation.
+
+```toml
+[tool]
+type = "gen_ai"
+provider_kind = "azure_openai" # or "openai", "ollama"
+model_name = "FLUX.1-Kontext-pro"
+model_display_name = "FLUX.1-Kontext-pro (image)"
+base_url = "https://<resource>.cognitiveservices.azure.com"
+api_key = "<api-key>"
+api_version = "2025-04-01-preview"
+image_quality = "standard"
+response_format = "b64_json"
 ```
 
 ## MCP Tool
@@ -144,7 +153,7 @@ Generate images from text prompts.
 
 **Returns:**
 - `images` (array): Array of generated image objects with:
-  - `data_uri` (string): Base64-encoded data URI (e.g., `data:image/png;base64,...`)
+  - `data_base64` (string): Base64-encoded image data (no data URI prefix)
   - `width` (integer): Image width in pixels
   - `height` (integer): Image height in pixels
   - `mime_type` (string): MIME type (e.g., `image/png`)
@@ -156,6 +165,10 @@ The response includes `_meta` fields with token usage tracking:
 - `chat.erato/token_usage/total_completion_tokens`: Tokens used for generation
 - `chat.erato/token_usage/total_tokens`: Total tokens used
 - `chat.erato/token_usage/model_identifier`: Model/backend identifier
+
+**Tool Output Schema:**
+
+The tool listing includes an `outputSchema` for `generate_image`. The `images[].data_base64` field is annotated with `chat.erato/file_content_field: true` and `contentEncoding: "base64"` to indicate binary data content.
 
 **Example Request:**
 
@@ -174,7 +187,7 @@ The response includes `_meta` fields with token usage tracking:
 {
   "images": [
     {
-      "data_uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
+      "data_base64": "iVBORw0KGgoAAAANSUhEUgAA...",
       "width": 500,
       "height": 500,
       "mime_type": "image/png"
