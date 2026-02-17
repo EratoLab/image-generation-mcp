@@ -170,6 +170,18 @@ The response includes `_meta` fields with token usage tracking:
 
 The tool listing includes an `outputSchema` for `generate_image`. The `images[].data_base64` field is annotated with `chat.erato/file_content_field: true` and `contentEncoding: "base64"` to indicate binary data content.
 
+**Content Filter Errors:**
+
+If a provider blocks image generation due to content policy, the tool returns a MCP tool result with `is_error: true` and structured content like:
+
+```json
+{
+  "type": "content_filter",
+  "error_description": "The request was filtered by content policy.",
+  "filter_details": { }
+}
+```
+
 **Example Request:**
 
 ```json

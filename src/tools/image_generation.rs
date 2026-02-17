@@ -8,6 +8,8 @@ use crate::error::Result;
 use crate::tools::{Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "mcp-server")]
+use serde_json::Value;
 use serde_json::json;
 
 #[cfg(feature = "mcp-server")]
@@ -22,6 +24,8 @@ use genai::adapter::AdapterKind;
 use genai::chat::{BinarySource, ContentPart, ImageRequest};
 #[cfg(feature = "mcp-server")]
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+#[cfg(feature = "mcp-server")]
+use genai::webc;
 #[cfg(feature = "mcp-server")]
 use genai::{Client as GenaiClient, ModelIden, ServiceTarget};
 #[cfg(feature = "mcp-server")]
@@ -102,7 +106,11 @@ impl Tool for ImageGenerationTool {
         "generate_image"
     }
 
-    async fn execute_typed(&self, params: Self::Params, _context: &mut ToolContext<'_>) -> Result<ToolResult> {
+    async fn execute_typed(
+        &self,
+        params: Self::Params,
+        _context: &mut ToolContext<'_>,
+    ) -> Result<ToolResult> {
         // Execute based on tool type
         #[cfg(feature = "mcp-server")]
         let (result, token_usage) = {
@@ -152,9 +160,141 @@ impl Tool for ImageGenerationTool {
 }
 
 impl ImageGenerationTool {
+    #[cfg(feature = "mcp-server")]
+    fn message_indicates_content_filter(message: &str) -> bool {
+        let message = message.to_ascii_lowercase();
+        message.contains("content rejected")
+            || message.contains("content filter")
+            || message.contains("content policy")
+            || message.contains("sexual content detection")
+            || message.contains("violence detection")
+            || message.contains("hate detection")
+            || message.contains("self-harm detection")
+            || message.contains("self harm detection")
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn inferred_filter_details_from_message(message: &str) -> Option<Value> {
+        let msg = message.to_ascii_lowercase();
+        let mut details = serde_json::Map::new();
+
+        if msg.contains("sexual") {
+            details.insert(
+                "sexual".to_string(),
+                json!({"filtered": true, "severity": "medium"}),
+            );
+        }
+        if msg.contains("violence") {
+            details.insert(
+                "violence".to_string(),
+                json!({"filtered": true, "severity": "medium"}),
+            );
+        }
+        if msg.contains("hate") {
+            details.insert(
+                "hate".to_string(),
+                json!({"filtered": true, "severity": "medium"}),
+            );
+        }
+        if msg.contains("self-harm") || msg.contains("self harm") {
+            details.insert(
+                "self_harm".to_string(),
+                json!({"filtered": true, "severity": "medium"}),
+            );
+        }
+
+        if details.is_empty() {
+            None
+        } else {
+            Some(Value::Object(details))
+        }
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn parse_content_filter_error_payload(payload: &Value) -> Option<Value> {
+        let mut candidates = vec![payload];
+        if let Some(error_obj) = payload.get("error") {
+            candidates.push(error_obj);
+        }
+
+        for candidate in candidates {
+            let error_type = candidate.get("type").and_then(Value::as_str);
+            let error_code = candidate.get("code").and_then(Value::as_str);
+            let message = candidate
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| payload.get("message").and_then(Value::as_str))
+                .unwrap_or_default();
+
+            let is_content_filter = error_type == Some("content_filter")
+                || error_code == Some("content_filter")
+                || Self::message_indicates_content_filter(message);
+
+            if !is_content_filter {
+                continue;
+            }
+
+            let error_description = candidate
+                .get("error_description")
+                .and_then(Value::as_str)
+                .or(Some(message))
+                .unwrap_or("The request was filtered by content policy.")
+                .to_string();
+
+            let filter_details = candidate
+                .get("filter_details")
+                .cloned()
+                .or_else(|| candidate.get("content_filter_result").cloned())
+                .or_else(|| {
+                    candidate
+                        .get("innererror")
+                        .and_then(|inner| inner.get("content_filter_result"))
+                        .cloned()
+                })
+                .or_else(|| Self::inferred_filter_details_from_message(&error_description));
+
+            return Some(json!({
+                "type": "content_filter",
+                "error_description": error_description,
+                "filter_details": filter_details
+            }));
+        }
+
+        None
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn parse_content_filter_error_from_body(body: &str) -> Option<Value> {
+        serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|payload| Self::parse_content_filter_error_payload(&payload))
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn parse_content_filter_error_from_genai_error(error: &genai::Error) -> Option<Value> {
+        match error {
+            genai::Error::ChatResponse { body, .. } => {
+                Self::parse_content_filter_error_payload(body)
+            }
+            genai::Error::WebModelCall { webc_error, .. }
+            | genai::Error::WebAdapterCall { webc_error, .. } => match webc_error {
+                webc::Error::ResponseFailedStatus { body, .. }
+                | webc::Error::ResponseFailedNotJson { body, .. } => {
+                    Self::parse_content_filter_error_from_body(body)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Execute mock image generation
     #[cfg(feature = "mcp-server")]
-    async fn execute_mock(&self, _params: &ImageGenerationParams, mock_config: &crate::config::MockToolConfig) -> Result<ToolResult> {
+    async fn execute_mock(
+        &self,
+        _params: &ImageGenerationParams,
+        mock_config: &crate::config::MockToolConfig,
+    ) -> Result<ToolResult> {
         // Read the static image file
         let image_path = Path::new(&mock_config.static_image_path);
 
@@ -166,12 +306,13 @@ impl ImageGenerationTool {
         }
 
         // Read image bytes
-        let image_bytes = tokio::fs::read(image_path)
-            .await
-            .map_err(|e| BrowserError::ToolExecutionFailed {
-                tool: self.name().to_string(),
-                reason: format!("Failed to read image file {}: {}", image_path.display(), e),
-            })?;
+        let image_bytes =
+            tokio::fs::read(image_path)
+                .await
+                .map_err(|e| BrowserError::ToolExecutionFailed {
+                    tool: self.name().to_string(),
+                    reason: format!("Failed to read image file {}: {}", image_path.display(), e),
+                })?;
 
         // Detect MIME type
         let mime_type = mime_guess::from_path(image_path)
@@ -234,13 +375,34 @@ impl ImageGenerationTool {
             .unwrap_or_else(|| "b64_json".to_string());
         image_request = image_request.with_response_format(response_format);
 
-        let image_response = client
+        let image_response = match client
             .exec_image_generation(&genai_config.model_name, image_request, None)
             .await
-            .map_err(|e| BrowserError::ToolExecutionFailed {
-                tool: self.name().to_string(),
-                reason: format!("GenAI image generation failed: {}", e),
-            })?;
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(content_filter_error) =
+                    Self::parse_content_filter_error_from_genai_error(&err)
+                {
+                    let result = ToolResult::failure_with_data(
+                        "Generation request blocked by content filter.",
+                        content_filter_error,
+                    );
+                    let token_usage = TokenUsage {
+                        total_prompt_tokens: 0,
+                        total_completion_tokens: 0,
+                        total_tokens: 0,
+                        model_identifier: genai_config.model_name.clone(),
+                    };
+                    return Ok((result, token_usage));
+                }
+
+                return Err(BrowserError::ToolExecutionFailed {
+                    tool: self.name().to_string(),
+                    reason: format!("GenAI image generation failed: {}", err),
+                });
+            }
+        };
 
         let mut images = Vec::new();
         for part in image_response.images {
@@ -301,9 +463,7 @@ impl ImageGenerationTool {
     }
 
     #[cfg(feature = "mcp-server")]
-    fn build_genai_client(
-        config: &crate::config::GenAiToolConfig,
-    ) -> Result<GenaiClient> {
+    fn build_genai_client(config: &crate::config::GenAiToolConfig) -> Result<GenaiClient> {
         let base_url = config.base_url.clone();
         let request_params = config.additional_request_parameters_map();
         let request_headers = config.additional_request_headers_map();
@@ -322,7 +482,9 @@ impl ImageGenerationTool {
         let custom_client = reqwest::ClientBuilder::new()
             .default_headers(header_map)
             .build()
-            .map_err(|e| BrowserError::ConfigError(format!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| {
+                BrowserError::ConfigError(format!("Failed to build HTTP client: {}", e))
+            })?;
 
         let provider_kind = config.provider_kind.clone();
         let model_name = config.model_name.clone();
@@ -417,6 +579,42 @@ mod tests {
         assert_eq!(token_usage.total_prompt_tokens, 400);
         assert_eq!(token_usage.total_completion_tokens, 0);
         assert_eq!(token_usage.total_tokens, 400);
+    }
+
+    #[test]
+    fn test_parse_content_filter_error_payload_infers_from_bad_request_message() {
+        let payload = json!({
+            "error": {
+                "code": "Bad Request",
+                "message": "Content rejected due to sexual content detection in the generated image.",
+                "status": 400
+            }
+        });
+
+        let parsed = ImageGenerationTool::parse_content_filter_error_payload(&payload)
+            .expect("expected content filter payload");
+        assert_eq!(parsed["type"], "content_filter");
+        assert_eq!(
+            parsed["error_description"],
+            "Content rejected due to sexual content detection in the generated image."
+        );
+        assert_eq!(parsed["filter_details"]["sexual"]["filtered"], true);
+    }
+
+    #[test]
+    fn test_parse_content_filter_error_payload_infers_violence_from_message() {
+        let payload = json!({
+            "error": {
+                "code": "Bad Request",
+                "message": "Content rejected due to violence detection in prompt.",
+                "status": 400
+            }
+        });
+
+        let parsed = ImageGenerationTool::parse_content_filter_error_payload(&payload)
+            .expect("expected content filter payload");
+        assert_eq!(parsed["type"], "content_filter");
+        assert_eq!(parsed["filter_details"]["violence"]["filtered"], true);
     }
 
     // Note: Integration tests requiring tokio are in the binary's test suite

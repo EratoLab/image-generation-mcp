@@ -3,15 +3,17 @@
 //! This binary provides a Model Context Protocol (MCP) server for image generation.
 //! It uses configurable backends to generate images from text prompts.
 
-use image_generation_mcp::mcp::BrowserServer;
 use clap::{Parser, ValueEnum};
+use image_generation_mcp::mcp::BrowserServer;
 use log::{debug, info};
 use rmcp::{ServiceExt, transport::stdio};
 use std::io::{stdin, stdout};
 use std::sync::Arc;
 
 #[cfg(feature = "mcp-server")]
-use rmcp::transport::streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, session::local::LocalSessionManager,
+};
 
 #[cfg(feature = "mcp-server")]
 use tokio::net::TcpListener;
@@ -58,12 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Image Generation MCP Server v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
-    let config = Arc::new(
-        image_generation_mcp::config::ServerConfig::load(cli.config).await?
-    );
+    let config = Arc::new(image_generation_mcp::config::ServerConfig::load(cli.config).await?);
 
     // Determine final transport settings (CLI overrides config file)
-    let transport_type = cli.transport
+    let transport_type = cli
+        .transport
         .map(|t| match t {
             Transport::Stdio => "stdio".to_string(),
             Transport::Http => "http".to_string(),
@@ -72,13 +73,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let host = cli.host.unwrap_or_else(|| config.transport.host.clone());
     let port = cli.port.unwrap_or(config.transport.port);
-    let http_path = cli.http_path.unwrap_or_else(|| config.transport.http_path.clone());
+    let http_path = cli
+        .http_path
+        .unwrap_or_else(|| config.transport.http_path.clone());
 
-    info!("Configuration loaded: tool type = {}", match &config.tool {
-        image_generation_mcp::config::ToolSection::Mock(_) => "mock",
-        image_generation_mcp::config::ToolSection::GenAi(_) => "genai",
-    });
-    info!("Transport: {} ({})", transport_type,
+    info!(
+        "Configuration loaded: tool type = {}",
+        match &config.tool {
+            image_generation_mcp::config::ToolSection::Mock(_) => "mock",
+            image_generation_mcp::config::ToolSection::GenAi(_) => "genai",
+        }
+    );
+    info!(
+        "Transport: {} ({})",
+        transport_type,
         match transport_type.as_str() {
             "stdio" => "standard input/output".to_string(),
             "http" => format!("http://{}:{}", host, port),
@@ -153,8 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Create service factory closure
             let service_factory = move || {
-                BrowserServer::new()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                BrowserServer::new().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             };
 
             let http_service = StreamableHttpService::new(

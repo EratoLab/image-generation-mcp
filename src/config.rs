@@ -228,11 +228,21 @@ impl ServerConfig {
     #[cfg(not(feature = "mcp-server"))]
     pub async fn load(explicit_path: Option<String>) -> Result<Self> {
         let config_path = Self::resolve_config_path(explicit_path)?;
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| BrowserError::ConfigError(format!("Failed to read config file {}: {}", config_path.display(), e)))?;
+        let content = std::fs::read_to_string(&config_path).map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Failed to read config file {}: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
 
-        let config: ServerConfig = toml::from_str(&content)
-            .map_err(|e| BrowserError::ConfigError(format!("Failed to parse config file {}: {}", config_path.display(), e)))?;
+        let config: ServerConfig = toml::from_str(&content).map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Failed to parse config file {}: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
 
         let config = config.migrate_tool_config()?;
 
@@ -283,12 +293,21 @@ impl ServerConfig {
     /// Load configuration from a specific file
     #[cfg(feature = "mcp-server")]
     async fn load_from_file(path: &PathBuf) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| BrowserError::ConfigError(format!("Failed to read config file {}: {}", path.display(), e)))?;
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
-        let config: ServerConfig = toml::from_str(&content)
-            .map_err(|e| BrowserError::ConfigError(format!("Failed to parse config file {}: {}", path.display(), e)))?;
+        let config: ServerConfig = toml::from_str(&content).map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Failed to parse config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         let config = config.migrate_tool_config()?;
 
@@ -303,7 +322,7 @@ impl ServerConfig {
         // Validate metadata prefix
         if !self.metadata.prefix.ends_with('/') {
             return Err(BrowserError::ConfigError(
-                "Metadata prefix must end with '/'".to_string()
+                "Metadata prefix must end with '/'".to_string(),
             ));
         }
 
@@ -322,7 +341,7 @@ impl ServerConfig {
             ToolSection::Mock(mock_config) => {
                 if mock_config.static_image_path.is_empty() {
                     return Err(BrowserError::ConfigError(
-                        "Mock tool static_image_path cannot be empty".to_string()
+                        "Mock tool static_image_path cannot be empty".to_string(),
                     ));
                 }
             }

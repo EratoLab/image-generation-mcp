@@ -83,6 +83,16 @@ impl ToolResult {
         }
     }
 
+    /// Create a failure result with structured error data
+    pub fn failure_with_data(error: impl Into<String>, data: Value) -> Self {
+        Self {
+            success: false,
+            data: Some(data),
+            error: Some(error.into()),
+            metadata: HashMap::new(),
+        }
+    }
+
     /// Add metadata to the result
     pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
         self.metadata.insert(key.into(), value);
@@ -105,7 +115,11 @@ pub trait Tool: Send + Sync + Default {
     }
 
     /// Execute the tool with strongly-typed parameters
-    async fn execute_typed(&self, params: Self::Params, context: &mut ToolContext<'_>) -> Result<ToolResult>;
+    async fn execute_typed(
+        &self,
+        params: Self::Params,
+        context: &mut ToolContext<'_>,
+    ) -> Result<ToolResult>;
 
     /// Execute the tool with JSON parameters (default implementation)
     async fn execute(&self, params: Value, context: &mut ToolContext<'_>) -> Result<ToolResult> {
@@ -232,6 +246,20 @@ mod tests {
         assert!(!result.success);
         assert!(result.data.is_none());
         assert_eq!(result.error, Some("Test error".to_string()));
+    }
+
+    #[test]
+    fn test_tool_result_failure_with_data() {
+        let result = ToolResult::failure_with_data(
+            "Filtered",
+            serde_json::json!({"type": "content_filter"}),
+        );
+        assert!(!result.success);
+        assert_eq!(result.error, Some("Filtered".to_string()));
+        assert_eq!(
+            result.data,
+            Some(serde_json::json!({"type": "content_filter"}))
+        );
     }
 
     #[test]
