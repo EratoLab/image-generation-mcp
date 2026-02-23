@@ -121,19 +121,31 @@ type = "mock"
 static_image_path = "path/to/image.png"
 ```
 
-#### GenAI Backend (OpenAI / Azure OpenAI-compatible / Ollama)
-Uses the forked `genai` client for real image generation.
+#### GenAI Backend (OpenAI / Azure OpenAI-compatible / Ollama / Gemini via Vertex AI)
+Uses the forked `genai` client for OpenAI-compatible providers and direct Vertex API calls for Gemini image generation.
 
 ```toml
 [tool]
 type = "gen_ai"
-provider_kind = "azure_openai" # or "openai", "ollama"
+provider_kind = "azure_openai" # or "openai", "ollama", "gemini", "vertex_ai"
 model_name = "FLUX.1-Kontext-pro"
 model_display_name = "FLUX.1-Kontext-pro (image)"
 base_url = "https://<resource>.cognitiveservices.azure.com"
 api_key = "<api-key>"
 api_version = "2025-04-01-preview"
 image_quality = "standard"
+response_format = "b64_json"
+```
+
+Gemini / Vertex AI example:
+
+```toml
+[tool]
+type = "gen_ai"
+provider_kind = "vertex_ai" # auto-migrates to "gemini"
+model_name = "gemini-2.5-flash-image"
+region = "europe-west4"
+api_key = "<vertex-express-api-key>"
 response_format = "b64_json"
 ```
 

@@ -95,11 +95,12 @@ pub struct MockToolConfig {
 /// GenAI-backed tool configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenAiToolConfig {
-    /// openai, azure_openai, or ollama
+    /// openai, azure_openai, ollama, gemini, or vertex_ai
     pub provider_kind: String,
     pub model_name: String,
     pub model_display_name: Option<String>,
     pub base_url: Option<String>,
+    pub region: Option<String>,
     pub api_key: Option<String>,
     pub api_version: Option<String>,
     pub additional_request_parameters: Option<Vec<String>>,
@@ -110,6 +111,10 @@ pub struct GenAiToolConfig {
 }
 
 impl GenAiToolConfig {
+    pub const VERTEX_AI_BASE_URL: &str = "https://aiplatform.googleapis.com/v1/publishers/google/";
+    pub const VERTEX_AI_REGION_BASE_URL_TEMPLATE: &str =
+        "https://{region}-aiplatform.googleapis.com/v1/publishers/google/";
+
     /// Parses additional_request_parameters into key/value pairs.
     pub fn additional_request_parameters_map(&self) -> std::collections::HashMap<String, String> {
         let mut params = std::collections::HashMap::new();
@@ -181,6 +186,7 @@ impl GenAiToolConfig {
             model_name: self.model_name,
             model_display_name: self.model_display_name,
             base_url,
+            region: self.region,
             api_key: None,
             api_version: None,
             additional_request_parameters: if additional_params.is_empty() {
@@ -197,6 +203,28 @@ impl GenAiToolConfig {
             image_style: self.image_style,
             response_format: self.response_format,
         })
+    }
+
+    /// Migrates vertex_ai configuration to gemini format.
+    pub fn migrate_vertex_ai_to_gemini(mut self) -> Self {
+        if self.provider_kind != "vertex_ai" {
+            return self;
+        }
+
+        self.provider_kind = "gemini".to_string();
+        if self.base_url.is_none() {
+            self.base_url = Some(
+                self.region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|region| !region.is_empty())
+                    .map(|region| {
+                        Self::VERTEX_AI_REGION_BASE_URL_TEMPLATE.replace("{region}", region)
+                    })
+                    .unwrap_or_else(|| Self::VERTEX_AI_BASE_URL.to_string()),
+            );
+        }
+        self
     }
 }
 
@@ -346,7 +374,7 @@ impl ServerConfig {
                 }
             }
             ToolSection::GenAi(genai_config) => {
-                let valid_providers = ["openai", "azure_openai", "ollama"];
+                let valid_providers = ["openai", "azure_openai", "ollama", "gemini", "vertex_ai"];
                 if !valid_providers.contains(&genai_config.provider_kind.as_str()) {
                     return Err(BrowserError::ConfigError(format!(
                         "Invalid genai provider_kind: '{}'. Must be one of: {}",
@@ -368,7 +396,11 @@ impl ServerConfig {
     /// Migrate tool configuration for backwards-compatible provider aliases.
     fn migrate_tool_config(mut self) -> Result<Self> {
         if let ToolSection::GenAi(genai_config) = self.tool.clone() {
-            self.tool = ToolSection::GenAi(genai_config.migrate_azure_openai_to_openai()?);
+            self.tool = ToolSection::GenAi(
+                genai_config
+                    .migrate_azure_openai_to_openai()?
+                    .migrate_vertex_ai_to_gemini(),
+            );
         }
         Ok(self)
     }
@@ -443,5 +475,50 @@ mod tests {
 
         let config: ServerConfig = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_vertex_ai_migration_to_gemini_with_region() {
+        let config = ServerConfig {
+            server: ServerSection {
+                name: "image-generation-mcp".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            tool: ToolSection::GenAi(GenAiToolConfig {
+                provider_kind: "vertex_ai".to_string(),
+                model_name: "gemini-2.5-flash-image".to_string(),
+                model_display_name: None,
+                base_url: None,
+                region: Some("europe-west4".to_string()),
+                api_key: Some("key".to_string()),
+                api_version: None,
+                additional_request_parameters: None,
+                additional_request_headers: None,
+                image_quality: None,
+                image_style: None,
+                response_format: None,
+            }),
+            metadata: MetadataConfig {
+                prefix: "chat.erato/".to_string(),
+            },
+            transport: TransportConfig::default(),
+        };
+
+        let migrated = config
+            .migrate_tool_config()
+            .expect("migration should succeed");
+        match migrated.tool {
+            ToolSection::GenAi(genai) => {
+                assert_eq!(genai.provider_kind, "gemini");
+                assert_eq!(
+                    genai.base_url,
+                    Some(
+                        "https://europe-west4-aiplatform.googleapis.com/v1/publishers/google/"
+                            .to_string()
+                    )
+                );
+            }
+            ToolSection::Mock(_) => panic!("expected genai tool"),
+        }
     }
 }

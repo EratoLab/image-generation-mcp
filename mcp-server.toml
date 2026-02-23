@@ -11,16 +11,13 @@ static_image_path = "static/image_1.png"
 #[tool.mock]
 #static_image_path = "static/image_1.png"
 
-# GenAI backend example (OpenAI, Azure OpenAI-compatible, or Ollama)
+# GenAI backend example (OpenAI, Azure OpenAI-compatible, Ollama, or Gemini/Vertex)
 # [tool]
 # type = "gen_ai"
-# provider_kind = "azure_openai"
-# model_name = "FLUX.1-Kontext-pro"
-# model_display_name = "FLUX.1-Kontext-pro (image)"
-# base_url = "https://<resource>.cognitiveservices.azure.com"
-# api_key = "<api-key>"
-# api_version = "2025-04-01-preview"
-# image_quality = "standard"
+# provider_kind = "vertex_ai" # or "gemini"
+# model_name = "gemini-2.5-flash-image"
+# region = "europe-west4"
+# api_key = "<vertex-express-api-key>"
 # response_format = "b64_json"
 
 [metadata]

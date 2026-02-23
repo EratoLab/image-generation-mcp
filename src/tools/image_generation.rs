@@ -29,6 +29,8 @@ use genai::webc;
 #[cfg(feature = "mcp-server")]
 use genai::{Client as GenaiClient, ModelIden, ServiceTarget};
 #[cfg(feature = "mcp-server")]
+use reqwest::Url;
+#[cfg(feature = "mcp-server")]
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(feature = "mcp-server")]
 use std::path::Path;
@@ -160,6 +162,98 @@ impl Tool for ImageGenerationTool {
 }
 
 impl ImageGenerationTool {
+    #[cfg(feature = "mcp-server")]
+    fn is_gemini_provider(config: &crate::config::GenAiToolConfig) -> bool {
+        config.provider_kind == "gemini"
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn closest_aspect_ratio(width: u32, height: u32) -> &'static str {
+        if width == 0 || height == 0 {
+            return "1:1";
+        }
+
+        let target = width as f64 / height as f64;
+        let candidates: [(&str, f64); 7] = [
+            ("1:1", 1.0),
+            ("16:9", 16.0 / 9.0),
+            ("9:16", 9.0 / 16.0),
+            ("4:3", 4.0 / 3.0),
+            ("3:4", 3.0 / 4.0),
+            ("3:2", 3.0 / 2.0),
+            ("2:3", 2.0 / 3.0),
+        ];
+
+        let mut best = candidates[0];
+        let mut best_delta = (target - best.1).abs();
+        for candidate in &candidates[1..] {
+            let delta = (target - candidate.1).abs();
+            if delta < best_delta {
+                best = *candidate;
+                best_delta = delta;
+            }
+        }
+
+        best.0
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn map_usage_from_vertex(payload: &Value, model_identifier: String) -> TokenUsage {
+        let usage = payload.get("usageMetadata");
+        TokenUsage {
+            total_prompt_tokens: usage
+                .and_then(|u| u.get("promptTokenCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            total_completion_tokens: usage
+                .and_then(|u| u.get("candidatesTokenCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            total_tokens: usage
+                .and_then(|u| u.get("totalTokenCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            model_identifier,
+        }
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn default_vertex_base_url(config: &crate::config::GenAiToolConfig) -> String {
+        config
+            .region
+            .as_deref()
+            .map(str::trim)
+            .filter(|region| !region.is_empty())
+            .map(|region| {
+                crate::config::GenAiToolConfig::VERTEX_AI_REGION_BASE_URL_TEMPLATE
+                    .replace("{region}", region)
+            })
+            .unwrap_or_else(|| crate::config::GenAiToolConfig::VERTEX_AI_BASE_URL.to_string())
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn build_custom_http_client(
+        config: &crate::config::GenAiToolConfig,
+    ) -> Result<reqwest::Client> {
+        let request_headers = config.additional_request_headers_map();
+
+        let mut header_map = HeaderMap::new();
+        for (key, value) in request_headers {
+            let name = HeaderName::from_str(&key).map_err(|e| {
+                BrowserError::ConfigError(format!("Invalid header name '{}': {}", key, e))
+            })?;
+            let value = HeaderValue::from_str(&value).map_err(|e| {
+                BrowserError::ConfigError(format!("Invalid header value for '{}': {}", key, e))
+            })?;
+            header_map.insert(name, value);
+        }
+
+        reqwest::ClientBuilder::new()
+            .default_headers(header_map)
+            .build()
+            .map_err(|e| BrowserError::ConfigError(format!("Failed to build HTTP client: {}", e)))
+    }
+
     #[cfg(feature = "mcp-server")]
     fn message_indicates_content_filter(message: &str) -> bool {
         let message = message.to_ascii_lowercase();
@@ -348,6 +442,10 @@ impl ImageGenerationTool {
         params: &ImageGenerationParams,
         genai_config: &crate::config::GenAiToolConfig,
     ) -> Result<(ToolResult, TokenUsage)> {
+        if Self::is_gemini_provider(genai_config) {
+            return self.execute_vertex_gemini(params, genai_config).await;
+        }
+
         let client = Self::build_genai_client(genai_config)?;
 
         let width = params.width.unwrap_or(1024);
@@ -463,28 +561,213 @@ impl ImageGenerationTool {
     }
 
     #[cfg(feature = "mcp-server")]
+    async fn execute_vertex_gemini(
+        &self,
+        params: &ImageGenerationParams,
+        genai_config: &crate::config::GenAiToolConfig,
+    ) -> Result<(ToolResult, TokenUsage)> {
+        let width = params.width.unwrap_or(1024);
+        let height = params.height.unwrap_or(1024);
+        let num_images = params.num_images.unwrap_or(1);
+        if num_images > i32::MAX as u32 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images is too large".to_string(),
+            ));
+        }
+        if width == 0 || height == 0 {
+            return Err(BrowserError::InvalidArgument(
+                "width and height must be greater than zero".to_string(),
+            ));
+        }
+
+        let response_format = genai_config
+            .response_format
+            .as_deref()
+            .unwrap_or("b64_json");
+        if response_format != "b64_json" {
+            return Err(BrowserError::ConfigError(format!(
+                "Gemini/Vertex image generation only supports response_format='b64_json', got '{}'",
+                response_format
+            )));
+        }
+
+        let base_url = genai_config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| Self::default_vertex_base_url(genai_config));
+        let base_url_for_err = base_url.clone();
+        let normalized_base = if base_url.ends_with('/') {
+            base_url
+        } else {
+            format!("{}/", base_url)
+        };
+
+        let mut request_url = Url::parse(&format!(
+            "{}models/{}:generateContent",
+            normalized_base, genai_config.model_name
+        ))
+        .map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Invalid Gemini/Vertex base_url '{}': {}",
+                base_url_for_err, e
+            ))
+        })?;
+
+        {
+            let mut query = request_url.query_pairs_mut();
+            for (key, value) in genai_config.additional_request_parameters_map() {
+                query.append_pair(&key, &value);
+            }
+            if let Some(api_key) = &genai_config.api_key {
+                query.append_pair("key", api_key);
+            }
+        }
+
+        let aspect_ratio = Self::closest_aspect_ratio(width, height);
+        let request_body = json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": params.prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "candidateCount": num_images,
+                "imageConfig": {
+                    "aspectRatio": aspect_ratio
+                }
+            }
+        });
+
+        let client = Self::build_custom_http_client(genai_config)?;
+        let response = client
+            .post(request_url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Gemini/Vertex image generation request failed: {}", e),
+            })?;
+
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to read Gemini/Vertex response body: {}", e),
+            })?;
+
+        if !status.is_success() {
+            if let Some(content_filter_error) =
+                Self::parse_content_filter_error_from_body(&body_text)
+            {
+                let result = ToolResult::failure_with_data(
+                    "Generation request blocked by content filter.",
+                    content_filter_error,
+                );
+                let token_usage = TokenUsage {
+                    total_prompt_tokens: 0,
+                    total_completion_tokens: 0,
+                    total_tokens: 0,
+                    model_identifier: genai_config.model_name.clone(),
+                };
+                return Ok((result, token_usage));
+            }
+
+            let reason = if body_text.is_empty() {
+                format!("Gemini/Vertex API returned HTTP {}", status)
+            } else if body_text
+                .to_ascii_lowercase()
+                .contains("multi-modal output is not supported")
+            {
+                format!(
+                    "Gemini/Vertex API returned HTTP {}: model '{}' does not support IMAGE output. Use an image-capable model such as 'gemini-2.5-flash-image'. Raw response: {}",
+                    status, genai_config.model_name, body_text
+                )
+            } else {
+                format!("Gemini/Vertex API returned HTTP {}: {}", status, body_text)
+            };
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason,
+            });
+        }
+
+        let payload: Value =
+            serde_json::from_str(&body_text).map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to parse Gemini/Vertex response JSON: {}", e),
+            })?;
+
+        let mut images = Vec::new();
+        if let Some(candidates) = payload.get("candidates").and_then(Value::as_array) {
+            for candidate in candidates {
+                let Some(parts) = candidate
+                    .get("content")
+                    .and_then(|content| content.get("parts"))
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+
+                for part in parts {
+                    let Some(inline_data) = part.get("inlineData").and_then(Value::as_object)
+                    else {
+                        continue;
+                    };
+
+                    let Some(data_base64) = inline_data.get("data").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let mime_type = inline_data
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("image/png")
+                        .to_string();
+
+                    images.push(GeneratedImage {
+                        data_base64: data_base64.to_string(),
+                        width,
+                        height,
+                        mime_type,
+                    });
+                }
+            }
+        }
+
+        if images.is_empty() {
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!(
+                    "Gemini/Vertex returned no inline image data. Response payload: {}",
+                    payload
+                ),
+            });
+        }
+
+        let model_identifier = payload
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .unwrap_or(&genai_config.model_name)
+            .to_string();
+        let token_usage = Self::map_usage_from_vertex(&payload, model_identifier);
+
+        let response = ImageGenerationResponse { images };
+        Ok((ToolResult::success_with(response), token_usage))
+    }
+
+    #[cfg(feature = "mcp-server")]
     fn build_genai_client(config: &crate::config::GenAiToolConfig) -> Result<GenaiClient> {
         let base_url = config.base_url.clone();
         let request_params = config.additional_request_parameters_map();
-        let request_headers = config.additional_request_headers_map();
-
-        let mut header_map = HeaderMap::new();
-        for (key, value) in request_headers {
-            let name = HeaderName::from_str(&key).map_err(|e| {
-                BrowserError::ConfigError(format!("Invalid header name '{}': {}", key, e))
-            })?;
-            let value = HeaderValue::from_str(&value).map_err(|e| {
-                BrowserError::ConfigError(format!("Invalid header value for '{}': {}", key, e))
-            })?;
-            header_map.insert(name, value);
-        }
-
-        let custom_client = reqwest::ClientBuilder::new()
-            .default_headers(header_map)
-            .build()
-            .map_err(|e| {
-                BrowserError::ConfigError(format!("Failed to build HTTP client: {}", e))
-            })?;
+        let custom_client = Self::build_custom_http_client(config)?;
 
         let provider_kind = config.provider_kind.clone();
         let model_name = config.model_name.clone();
@@ -502,7 +785,7 @@ impl ImageGenerationTool {
                                 "Unknown provider kind".to_string(),
                             ));
                         }
-                    };
+            };
 
                     let mut endpoint = Self::default_endpoint(adapter_kind);
                     if let Some(base_url) = base_url.clone() {
@@ -615,6 +898,35 @@ mod tests {
             .expect("expected content filter payload");
         assert_eq!(parsed["type"], "content_filter");
         assert_eq!(parsed["filter_details"]["violence"]["filtered"], true);
+    }
+
+    #[test]
+    fn test_closest_aspect_ratio_mapping() {
+        assert_eq!(ImageGenerationTool::closest_aspect_ratio(1024, 1024), "1:1");
+        assert_eq!(
+            ImageGenerationTool::closest_aspect_ratio(1920, 1080),
+            "16:9"
+        );
+        assert_eq!(
+            ImageGenerationTool::closest_aspect_ratio(1080, 1920),
+            "9:16"
+        );
+    }
+
+    #[test]
+    fn test_map_usage_from_vertex_payload() {
+        let payload = json!({
+            "usageMetadata": {
+                "promptTokenCount": 11,
+                "candidatesTokenCount": 7,
+                "totalTokenCount": 18
+            }
+        });
+        let usage = ImageGenerationTool::map_usage_from_vertex(&payload, "gemini-x".to_string());
+        assert_eq!(usage.total_prompt_tokens, 11);
+        assert_eq!(usage.total_completion_tokens, 7);
+        assert_eq!(usage.total_tokens, 18);
+        assert_eq!(usage.model_identifier, "gemini-x");
     }
 
     // Note: Integration tests requiring tokio are in the binary's test suite

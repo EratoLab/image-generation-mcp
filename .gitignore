@@ -1,3 +1,4 @@
 /target
 /example/**
 mcp-server.local.toml
+mcp-server.vertex.toml
