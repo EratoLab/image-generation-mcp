@@ -19,9 +19,19 @@ pub struct BrowserServer {
 impl BrowserServer {
     /// Create a new image generation server
     pub fn new() -> Result<Self, String> {
-        Ok(Self {
-            tool_router: Self::tool_router(),
-        })
+        Self::new_with_tool_description(None)
+    }
+
+    /// Create a new image generation server with optional runtime tool description override.
+    pub fn new_with_tool_description(tool_description: Option<String>) -> Result<Self, String> {
+        let mut tool_router = Self::tool_router();
+        if let Some(description) = tool_description
+            && let Some(route) = tool_router.map.get_mut("generate_image")
+        {
+            route.attr.description = Some(description.into());
+        }
+
+        Ok(Self { tool_router })
     }
 }
 

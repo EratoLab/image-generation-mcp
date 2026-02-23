@@ -84,6 +84,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             image_generation_mcp::config::ToolSection::GenAi(_) => "genai",
         }
     );
+
+    let tool_description = match &config.tool {
+        image_generation_mcp::config::ToolSection::Mock(mock) => mock.tool_description.clone(),
+        image_generation_mcp::config::ToolSection::GenAi(genai) => genai.tool_description.clone(),
+    };
     info!(
         "Transport: {} ({})",
         transport_type,
@@ -102,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "stdio" => {
             info!("Ready to accept MCP connections via stdio");
             let (_read, _write) = (stdin(), stdout());
-            let service = BrowserServer::new()
+            let service = BrowserServer::new_with_tool_description(tool_description.clone())
                 .map_err(|e| format!("Failed to create image generation server: {}", e))?;
             let server = service.serve(stdio()).await?;
 
@@ -158,10 +163,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("HTTP path: {}", http_path);
 
             let bind_addr = format!("{}:{}", host, port);
+            let http_tool_description = tool_description.clone();
 
             // Create service factory closure
             let service_factory = move || {
-                BrowserServer::new().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                BrowserServer::new_with_tool_description(http_tool_description.clone())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             };
 
             let http_service = StreamableHttpService::new(

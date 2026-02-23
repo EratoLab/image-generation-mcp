@@ -74,6 +74,7 @@ version = "0.1.0"
 [tool]
 type = "mock"  # Backend type: mock or gen_ai
 static_image_path = "static/image_1.png"
+tool_description = "Generate an image from a text prompt" # optional, shown in tool list
 
 [metadata]
 prefix = "chat.erato/"  # Prefix for token usage metadata fields
@@ -119,6 +120,7 @@ Returns a static image file. Useful for testing and development.
 [tool]
 type = "mock"
 static_image_path = "path/to/image.png"
+tool_description = "Generate an image from a text prompt"
 ```
 
 #### GenAI Backend (OpenAI / Azure OpenAI-compatible / Ollama / Gemini via Vertex AI)
@@ -135,6 +137,7 @@ api_key = "<api-key>"
 api_version = "2025-04-01-preview"
 image_quality = "standard"
 response_format = "b64_json"
+tool_description = "Generate an image from a text prompt"
 ```
 
 Gemini / Vertex AI example:

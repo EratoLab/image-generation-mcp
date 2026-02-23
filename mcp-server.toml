@@ -7,6 +7,7 @@ version = "0.1.0"
 [tool]
 type = "mock"
 static_image_path = "static/image_1.png"
+tool_description = "Generate an image from a text prompt"
 
 #[tool.mock]
 #static_image_path = "static/image_1.png"
@@ -19,6 +20,7 @@ static_image_path = "static/image_1.png"
 # region = "europe-west4"
 # api_key = "<vertex-express-api-key>"
 # response_format = "b64_json"
+# tool_description = "Generate an image from a text prompt"
 
 [metadata]
 prefix = "chat.erato/"
