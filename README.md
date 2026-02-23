@@ -74,6 +74,7 @@ version = "0.1.0"
 [tool]
 type = "mock"  # Backend type: mock or gen_ai
 static_image_path = "static/image_1.png"
+tool_name = "generate_image" # optional, defaults to generate_image
 tool_description = "Generate an image from a text prompt" # optional, shown in tool list
 
 [metadata]
@@ -120,6 +121,7 @@ Returns a static image file. Useful for testing and development.
 [tool]
 type = "mock"
 static_image_path = "path/to/image.png"
+tool_name = "generate_image"
 tool_description = "Generate an image from a text prompt"
 ```
 
@@ -137,6 +139,7 @@ api_key = "<api-key>"
 api_version = "2025-04-01-preview"
 image_quality = "standard"
 response_format = "b64_json"
+tool_name = "generate_image"
 tool_description = "Generate an image from a text prompt"
 ```
 

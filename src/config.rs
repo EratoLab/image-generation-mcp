@@ -90,6 +90,7 @@ pub enum ToolSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MockToolConfig {
     pub static_image_path: String,
+    pub tool_name: Option<String>,
     pub tool_description: Option<String>,
 }
 
@@ -109,6 +110,7 @@ pub struct GenAiToolConfig {
     pub image_quality: Option<String>,
     pub image_style: Option<String>,
     pub response_format: Option<String>,
+    pub tool_name: Option<String>,
     pub tool_description: Option<String>,
 }
 
@@ -204,6 +206,7 @@ impl GenAiToolConfig {
             image_quality: self.image_quality,
             image_style: self.image_style,
             response_format: self.response_format,
+            tool_name: self.tool_name,
             tool_description: self.tool_description,
         })
     }
@@ -436,6 +439,7 @@ mod tests {
             [tool]
             type = "mock"
             static_image_path = "static/image_1.png"
+            tool_name = "generate_image"
             tool_description = "Generate an image from a text prompt"
 
             [metadata]
@@ -454,6 +458,7 @@ mod tests {
         match config.tool {
             ToolSection::Mock(mock) => {
                 assert_eq!(mock.static_image_path, "static/image_1.png");
+                assert_eq!(mock.tool_name.as_deref(), Some("generate_image"));
                 assert_eq!(
                     mock.tool_description.as_deref(),
                     Some("Generate an image from a text prompt")
@@ -505,6 +510,7 @@ mod tests {
                 image_quality: None,
                 image_style: None,
                 response_format: None,
+                tool_name: None,
                 tool_description: None,
             }),
             metadata: MetadataConfig {

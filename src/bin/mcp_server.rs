@@ -85,9 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    let tool_description = match &config.tool {
-        image_generation_mcp::config::ToolSection::Mock(mock) => mock.tool_description.clone(),
-        image_generation_mcp::config::ToolSection::GenAi(genai) => genai.tool_description.clone(),
+    let (tool_name, tool_description) = match &config.tool {
+        image_generation_mcp::config::ToolSection::Mock(mock) => {
+            (mock.tool_name.clone(), mock.tool_description.clone())
+        }
+        image_generation_mcp::config::ToolSection::GenAi(genai) => {
+            (genai.tool_name.clone(), genai.tool_description.clone())
+        }
     };
     info!(
         "Transport: {} ({})",
@@ -107,8 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "stdio" => {
             info!("Ready to accept MCP connections via stdio");
             let (_read, _write) = (stdin(), stdout());
-            let service = BrowserServer::new_with_tool_description(tool_description.clone())
-                .map_err(|e| format!("Failed to create image generation server: {}", e))?;
+            let service =
+                BrowserServer::new_with_tool_overrides(tool_name.clone(), tool_description.clone())
+                    .map_err(|e| format!("Failed to create image generation server: {}", e))?;
             let server = service.serve(stdio()).await?;
 
             // Set up signal handler for graceful shutdown
@@ -163,12 +168,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("HTTP path: {}", http_path);
 
             let bind_addr = format!("{}:{}", host, port);
+            let http_tool_name = tool_name.clone();
             let http_tool_description = tool_description.clone();
 
             // Create service factory closure
             let service_factory = move || {
-                BrowserServer::new_with_tool_description(http_tool_description.clone())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                BrowserServer::new_with_tool_overrides(
+                    http_tool_name.clone(),
+                    http_tool_description.clone(),
+                )
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             };
 
             let http_service = StreamableHttpService::new(

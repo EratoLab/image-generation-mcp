@@ -19,16 +19,30 @@ pub struct BrowserServer {
 impl BrowserServer {
     /// Create a new image generation server
     pub fn new() -> Result<Self, String> {
-        Self::new_with_tool_description(None)
+        Self::new_with_tool_overrides(None, None)
     }
 
-    /// Create a new image generation server with optional runtime tool description override.
-    pub fn new_with_tool_description(tool_description: Option<String>) -> Result<Self, String> {
+    /// Create a new image generation server with optional runtime tool metadata overrides.
+    pub fn new_with_tool_overrides(
+        tool_name: Option<String>,
+        tool_description: Option<String>,
+    ) -> Result<Self, String> {
         let mut tool_router = Self::tool_router();
-        if let Some(description) = tool_description
-            && let Some(route) = tool_router.map.get_mut("generate_image")
-        {
-            route.attr.description = Some(description.into());
+        if let Some(mut route) = tool_router.map.remove("generate_image") {
+            if let Some(name) = tool_name {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    return Err("tool_name cannot be empty".to_string());
+                }
+                route.attr.name = trimmed.to_string().into();
+            }
+
+            if let Some(description) = tool_description {
+                route.attr.description = Some(description.into());
+            }
+
+            let new_name = route.attr.name.to_string();
+            tool_router.map.insert(new_name.into(), route);
         }
 
         Ok(Self { tool_router })
