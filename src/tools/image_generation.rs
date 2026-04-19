@@ -21,7 +21,9 @@ use base64::Engine;
 #[cfg(feature = "mcp-server")]
 use genai::adapter::AdapterKind;
 #[cfg(feature = "mcp-server")]
-use genai::chat::{BinarySource, ContentPart, ImageRequest};
+use genai::chat::{
+    BinarySource, ContentPart, ImageRequest,
+};
 #[cfg(feature = "mcp-server")]
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 #[cfg(feature = "mcp-server")]
@@ -36,6 +38,43 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::path::Path;
 #[cfg(feature = "mcp-server")]
 use std::str::FromStr;
+
+/// Parameters for image editing
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImageEditParams {
+    /// Source image as a URI/data URI.
+    pub image_uri: Option<String>,
+
+    /// Source image as raw base64 payload (no data URI prefix).
+    #[schemars(extend(
+        "contentEncoding" = "base64",
+        "chat.erato/file_content_field" = true
+    ))]
+    pub image_data_base64: Option<String>,
+
+    /// MIME type for the source image.
+    #[serde(default)]
+    pub image_mime_type: Option<String>,
+
+    /// Editing prompt for the image.
+    pub prompt: String,
+
+    /// Optional width of the edited image (default: 1024)
+    #[serde(default = "default_width")]
+    pub width: Option<u32>,
+
+    /// Optional height of the edited image (default: 1024)
+    #[serde(default = "default_height")]
+    pub height: Option<u32>,
+
+    /// Number of edited images to generate (default: 1)
+    #[serde(default = "default_num_images")]
+    pub num_images: Option<u32>,
+}
+
+/// Edit-image tool
+#[derive(Debug, Default)]
+pub struct ImageEditTool;
 
 /// Image generation tool
 #[derive(Debug, Default)]
@@ -157,6 +196,60 @@ impl Tool for ImageGenerationTool {
 
         let result_with_meta = result.with_metadata("token_usage", token_meta);
 
+        Ok(result_with_meta)
+    }
+}
+
+#[async_trait]
+impl Tool for ImageEditTool {
+    type Params = ImageEditParams;
+
+    fn name(&self) -> &str {
+        "edit_image"
+    }
+
+    async fn execute_typed(
+        &self,
+        params: Self::Params,
+        _context: &mut ToolContext<'_>,
+    ) -> Result<ToolResult> {
+        #[cfg(feature = "mcp-server")]
+        let (result, token_usage) = {
+            let config = crate::config::get_global_config().await;
+            match &config.tool {
+                ToolSection::Mock(mock_config) => {
+                    let result = self.execute_mock(&params, mock_config).await?;
+                    let token_usage = TokenUsage {
+                        total_prompt_tokens: (params.prompt.len() as u64) * 4,
+                        total_completion_tokens: 0,
+                        total_tokens: (params.prompt.len() as u64) * 4,
+                        model_identifier: "mock/v1".to_string(),
+                    };
+                    (result, token_usage)
+                }
+                ToolSection::GenAi(genai_config) => self.execute_genai(&params, genai_config).await?,
+            }
+        };
+
+        #[cfg(not(feature = "mcp-server"))]
+        let (result, token_usage) = (
+            ToolResult::failure("Image editing is not available without mcp-server feature"),
+            TokenUsage {
+                total_prompt_tokens: 0,
+                total_completion_tokens: 0,
+                total_tokens: 0,
+                model_identifier: "none".to_string(),
+            },
+        );
+
+        let token_meta = json!({
+            "total_prompt_tokens": token_usage.total_prompt_tokens,
+            "total_completion_tokens": token_usage.total_completion_tokens,
+            "total_tokens": token_usage.total_tokens,
+            "model_identifier": token_usage.model_identifier,
+        });
+
+        let result_with_meta = result.with_metadata("token_usage", token_meta);
         Ok(result_with_meta)
     }
 }
@@ -623,7 +716,7 @@ impl ImageGenerationTool {
             }
         }
 
-        let aspect_ratio = Self::closest_aspect_ratio(width, height);
+        let aspect_ratio = ImageGenerationTool::closest_aspect_ratio(width, height);
         let request_body = json!({
             "contents": [
                 {
@@ -835,6 +928,318 @@ impl ImageGenerationTool {
             AdapterKind::Ollama => Endpoint::from_static("http://localhost:11434/v1/"),
             _ => Endpoint::from_static("https://api.openai.com/v1/"),
         }
+    }
+}
+
+#[cfg(feature = "mcp-server")]
+impl ImageEditTool {
+    fn is_gemini_provider(config: &crate::config::GenAiToolConfig) -> bool {
+        config.provider_kind == "gemini" || config.provider_kind == "vertex_ai"
+    }
+
+    fn strip_data_uri_prefix(data: &str) -> String {
+        match data.find("base64,") {
+            Some(idx) => data[(idx + "base64,".len())..].to_string(),
+            None => data.to_string(),
+        }
+    }
+
+    fn sanitize_image_mime_type(params: &ImageEditParams) -> String {
+        params
+            .image_mime_type
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "image/png".to_string())
+            .trim()
+            .to_string()
+    }
+
+    fn image_output_mime(genai_config: &crate::config::GenAiToolConfig) -> String {
+        let configured = genai_config
+            .response_format
+            .as_deref()
+            .unwrap_or("image/png")
+            .trim()
+            .to_ascii_lowercase();
+
+        if configured == "jpeg" || configured == "jpg" {
+            "image/jpeg".to_string()
+        } else if configured == "webp" {
+            "image/webp".to_string()
+        } else if configured == "image/jpeg" || configured == "image/webp" || configured == "image/png" {
+            configured
+        } else {
+            "image/png".to_string()
+        }
+    }
+
+    fn image_input_part(params: &ImageEditParams) -> Result<Value> {
+        let image_mime = Self::sanitize_image_mime_type(params);
+        if let Some(uri) = params.image_uri.as_ref().filter(|uri| !uri.trim().is_empty()) {
+            return Ok(json!({
+                "file_data": {
+                    "mime_type": image_mime,
+                    "file_uri": uri.trim()
+                }
+            }));
+        }
+
+        if let Some(image_data_base64) = params.image_data_base64.as_ref().filter(|data| !data.trim().is_empty()) {
+            return Ok(json!({
+                "inline_data": {
+                    "mime_type": image_mime,
+                    "data": Self::strip_data_uri_prefix(image_data_base64.trim())
+                }
+            }));
+        }
+
+        Err(BrowserError::InvalidArgument(
+            "Either image_uri or image_data_base64 must be provided".to_string(),
+        ))
+    }
+
+    async fn execute_mock(
+        &self,
+        _params: &ImageEditParams,
+        mock_config: &crate::config::MockToolConfig,
+    ) -> Result<ToolResult> {
+        let generation_params = ImageGenerationParams {
+            prompt: "image edit request".to_string(),
+            width: default_width(),
+            height: default_height(),
+            num_images: default_num_images(),
+        };
+
+        let tool = ImageGenerationTool;
+        tool.execute_mock(&generation_params, mock_config).await
+    }
+
+    async fn execute_genai(
+        &self,
+        params: &ImageEditParams,
+        genai_config: &crate::config::GenAiToolConfig,
+    ) -> Result<(ToolResult, TokenUsage)> {
+        if Self::is_gemini_provider(genai_config) {
+            return self.execute_vertex_gemini(params, genai_config).await;
+        }
+
+        let reason = format!(
+            "Image editing is not yet implemented for provider '{}'; supported providers: gemini/vertex_ai (via generateContent).",
+            genai_config.provider_kind
+        );
+        let token_usage = TokenUsage {
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            total_tokens: 0,
+            model_identifier: genai_config.model_name.clone(),
+        };
+
+        Ok((
+            ToolResult::failure(reason),
+            token_usage,
+        ))
+    }
+
+    async fn execute_vertex_gemini(
+        &self,
+        params: &ImageEditParams,
+        genai_config: &crate::config::GenAiToolConfig,
+    ) -> Result<(ToolResult, TokenUsage)> {
+        let width = params.width.unwrap_or(1024);
+        let height = params.height.unwrap_or(1024);
+        let num_images = params.num_images.unwrap_or(1);
+
+        if params.prompt.trim().is_empty() {
+            return Err(BrowserError::InvalidArgument(
+                "prompt is required for image editing".to_string(),
+            ));
+        }
+
+        if width == 0 || height == 0 {
+            return Err(BrowserError::InvalidArgument(
+                "width and height must be greater than zero".to_string(),
+            ));
+        }
+
+        if num_images == 0 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images must be at least 1".to_string(),
+            ));
+        }
+
+        if num_images > i32::MAX as u32 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images is too large".to_string(),
+            ));
+        }
+
+        let image_input = Self::image_input_part(params)?;
+        let aspect_ratio = ImageGenerationTool::closest_aspect_ratio(width, height);
+        let response_format = Self::image_output_mime(genai_config);
+
+        let base_url = genai_config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| ImageGenerationTool::default_vertex_base_url(genai_config));
+        let base_url_for_err = base_url.clone();
+        let normalized_base = if base_url.ends_with('/') {
+            base_url
+        } else {
+            format!("{}/", base_url)
+        };
+
+        let mut request_url = Url::parse(&format!(
+            "{}models/{}:generateContent",
+            normalized_base, genai_config.model_name
+        ))
+        .map_err(|e| {
+            BrowserError::ConfigError(format!(
+                "Invalid Gemini/Vertex base_url '{}': {}",
+                base_url_for_err, e
+            ))
+        })?;
+
+        {
+            let mut query = request_url.query_pairs_mut();
+            for (key, value) in genai_config.additional_request_parameters_map() {
+                query.append_pair(&key, &value);
+            }
+            if let Some(api_key) = &genai_config.api_key {
+                query.append_pair("key", api_key);
+            }
+        }
+
+        let request_body = json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        image_input,
+                        { "text": params.prompt.as_str() },
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "candidateCount": num_images,
+                "imageConfig": {
+                    "aspectRatio": aspect_ratio,
+                    "imageOutputOptions": {
+                        "mimeType": response_format
+                    }
+                }
+            }
+        });
+
+        let client = ImageGenerationTool::build_custom_http_client(genai_config)?;
+        let response = client
+            .post(request_url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Gemini/Vertex image edit request failed: {}", e),
+            })?;
+
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to read Gemini/Vertex image edit response body: {}", e),
+            })?;
+
+        if !status.is_success() {
+            if let Some(content_filter_error) =
+                ImageGenerationTool::parse_content_filter_error_from_body(&body_text)
+            {
+                let result = ToolResult::failure_with_data(
+                    "Image edit request blocked by content filter.",
+                    content_filter_error,
+                );
+                let token_usage = TokenUsage {
+                    total_prompt_tokens: 0,
+                    total_completion_tokens: 0,
+                    total_tokens: 0,
+                    model_identifier: genai_config.model_name.clone(),
+                };
+                return Ok((result, token_usage));
+            }
+
+            let reason = if body_text.is_empty() {
+                format!("Gemini/Vertex API returned HTTP {}", status)
+            } else {
+                format!("Gemini/Vertex API returned HTTP {}: {}", status, body_text)
+            };
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason,
+            });
+        }
+
+        let payload: Value =
+            serde_json::from_str(&body_text).map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to parse Gemini/Vertex image edit response JSON: {}", e),
+            })?;
+
+        let mut images = Vec::new();
+        if let Some(candidates) = payload.get("candidates").and_then(Value::as_array) {
+            for candidate in candidates {
+                let Some(parts) = candidate
+                    .get("content")
+                    .and_then(|content| content.get("parts"))
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+
+                for part in parts {
+                    let Some(inline_data) = part.get("inlineData").and_then(Value::as_object)
+                    else {
+                        continue;
+                    };
+
+                    let Some(data_base64) = inline_data.get("data").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let mime_type = inline_data
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("image/png")
+                        .to_string();
+
+                    images.push(GeneratedImage {
+                        data_base64: data_base64.to_string(),
+                        width,
+                        height,
+                        mime_type,
+                    });
+                }
+            }
+        }
+
+        if images.is_empty() {
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!(
+                    "Gemini/Vertex image edit returned no inline image data. Response payload: {}",
+                    payload
+                ),
+            });
+        }
+
+        let model_identifier = payload
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .unwrap_or(&genai_config.model_name)
+            .to_string();
+        let token_usage = ImageGenerationTool::map_usage_from_vertex(&payload, model_identifier);
+
+        let response = ImageGenerationResponse { images };
+        Ok((ToolResult::success_with(response), token_usage))
     }
 }
 

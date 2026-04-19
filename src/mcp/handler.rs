@@ -19,13 +19,16 @@ pub struct BrowserServer {
 impl BrowserServer {
     /// Create a new image generation server
     pub fn new() -> Result<Self, String> {
-        Self::new_with_tool_overrides(None, None)
+        Self::new_with_tool_overrides(None, None, None, None, false)
     }
 
     /// Create a new image generation server with optional runtime tool metadata overrides.
     pub fn new_with_tool_overrides(
         tool_name: Option<String>,
         tool_description: Option<String>,
+        edit_tool_name: Option<String>,
+        edit_tool_description: Option<String>,
+        edit_tool_enabled: bool,
     ) -> Result<Self, String> {
         let mut tool_router = Self::tool_router();
         if let Some(mut route) = tool_router.map.remove("generate_image") {
@@ -43,6 +46,30 @@ impl BrowserServer {
 
             let new_name = route.attr.name.to_string();
             tool_router.map.insert(new_name.into(), route);
+        }
+
+        if let Some(mut edit_route) = tool_router.map.remove("edit_image") {
+            if !edit_tool_enabled {
+                // Explicitly remove when feature flag is disabled.
+                return Ok(Self { tool_router });
+            }
+
+            if let Some(name) = edit_tool_name {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    return Err("edit_tool_name cannot be empty".to_string());
+                }
+                edit_route.attr.name = trimmed.to_string().into();
+            }
+
+            if let Some(description) = edit_tool_description {
+                edit_route.attr.description = Some(description.into());
+            }
+
+            let new_name = edit_route.attr.name.to_string();
+            tool_router.map.insert(new_name.into(), edit_route);
+        } else if edit_tool_enabled {
+            return Err("edit_image tool override requested, but edit_image is not available in this build".to_string());
         }
 
         Ok(Self { tool_router })

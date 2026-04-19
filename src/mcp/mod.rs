@@ -97,6 +97,10 @@ register_mcp_tools! {
     generate_image => tools::image_generation::ImageGenerationTool,
         "Generate images from text prompts. Returns base64-encoded image data in the data_base64 field (no data URI prefix).",
         output_schema = rmcp::handler::server::tool::schema_for_type::<tools::image_generation::ImageGenerationResponse>();
+
+    edit_image => tools::image_generation::ImageEditTool,
+        "Edit images from text prompts plus an input image. Returns base64-encoded image data in the data_base64 field (no data URI prefix).",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::image_generation::ImageGenerationResponse>();
 }
 
 #[cfg(test)]

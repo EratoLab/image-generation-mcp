@@ -6,6 +6,7 @@ pub mod image_generation;
 
 // Re-export Params types for use by MCP layer
 pub use image_generation::ImageGenerationParams;
+pub use image_generation::ImageEditParams;
 
 use crate::error::Result;
 use serde_json::Value;

@@ -75,6 +75,9 @@ version = "0.1.0"
 type = "mock"  # Backend type: mock or gen_ai
 static_image_path = "static/image_1.png"
 tool_name = "generate_image" # optional, defaults to generate_image
+edit_image_enabled = false # optional, defaults to false
+edit_tool_name = "edit_image" # optional
+edit_tool_description = "Edit images from a source image + prompt" # optional
 tool_description = "Generate an image from a text prompt" # optional, shown in tool list
 
 [metadata]
@@ -157,7 +160,10 @@ response_format = "b64_json"
 
 ## MCP Tool
 
-The server exposes a single MCP tool:
+The server can expose one or two MCP tools depending on config:
+
+- `generate_image` (always available with provider config)
+- `edit_image` (optional, enabled by `edit_image_enabled = true`)
 
 ### `generate_image`
 
@@ -176,6 +182,26 @@ Generate images from text prompts.
   - `height` (integer): Image height in pixels
   - `mime_type` (string): MIME type (e.g., `image/png`)
 
+### `edit_image` (optional)
+
+Edit an image from one input source and a prompt.
+
+**Parameters:**
+- `prompt` (string, required): Editing prompt
+- `image_uri` (string, optional): URI of the source image (`file_data` payload)
+- `image_data_base64` (string, optional): Source image base64 payload (`inline_data`)
+- `image_mime_type` (string, optional): MIME type of source image (defaults to `image/png`)
+- `width` (integer, optional): Target width [default: 1024]
+- `height` (integer, optional): Target height [default: 1024]
+- `num_images` (integer, optional): Number of images to generate [default: 1]
+
+**Returns:**
+- `images` (array): Array of edited image objects with:
+  - `data_base64` (string): Base64-encoded image data (no data URI prefix)
+  - `width` (integer): Requested width in pixels
+  - `height` (integer): Requested height in pixels
+  - `mime_type` (string): MIME type (e.g., `image/png`)
+
 **Token Usage Metadata:**
 
 The response includes `_meta` fields with token usage tracking:
@@ -186,7 +212,7 @@ The response includes `_meta` fields with token usage tracking:
 
 **Tool Output Schema:**
 
-The tool listing includes an `outputSchema` for `generate_image`. The `images[].data_base64` field is annotated with `chat.erato/file_content_field: true` and `contentEncoding: "base64"` to indicate binary data content.
+The tool listing includes output schemas for both tools. For both `generate_image` and `edit_image`, the `images[].data_base64` field is annotated with `chat.erato/file_content_field: true` and `contentEncoding: "base64"` to indicate binary data content.
 
 **Content Filter Errors:**
 

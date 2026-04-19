@@ -85,12 +85,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    let (tool_name, tool_description) = match &config.tool {
+    let (tool_name, tool_description, edit_image_enabled, edit_tool_name, edit_tool_description) =
+        match &config.tool {
         image_generation_mcp::config::ToolSection::Mock(mock) => {
-            (mock.tool_name.clone(), mock.tool_description.clone())
+            (
+                mock.tool_name.clone(),
+                mock.tool_description.clone(),
+                mock.edit_image_enabled.unwrap_or(false),
+                mock.edit_tool_name.clone(),
+                mock.edit_tool_description.clone(),
+            )
         }
         image_generation_mcp::config::ToolSection::GenAi(genai) => {
-            (genai.tool_name.clone(), genai.tool_description.clone())
+            (
+                genai.tool_name.clone(),
+                genai.tool_description.clone(),
+                genai.edit_image_enabled.unwrap_or(false),
+                genai.edit_tool_name.clone(),
+                genai.edit_tool_description.clone(),
+            )
         }
     };
     info!(
@@ -112,7 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Ready to accept MCP connections via stdio");
             let (_read, _write) = (stdin(), stdout());
             let service =
-                BrowserServer::new_with_tool_overrides(tool_name.clone(), tool_description.clone())
+                BrowserServer::new_with_tool_overrides(
+                    tool_name.clone(),
+                    tool_description.clone(),
+                    edit_tool_name.clone(),
+                    edit_tool_description.clone(),
+                    edit_image_enabled,
+                )
                     .map_err(|e| format!("Failed to create image generation server: {}", e))?;
             let server = service.serve(stdio()).await?;
 
@@ -170,12 +189,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bind_addr = format!("{}:{}", host, port);
             let http_tool_name = tool_name.clone();
             let http_tool_description = tool_description.clone();
+            let http_edit_tool_name = edit_tool_name.clone();
+            let http_edit_tool_description = edit_tool_description.clone();
+            let http_edit_image_enabled = edit_image_enabled;
 
             // Create service factory closure
             let service_factory = move || {
                 BrowserServer::new_with_tool_overrides(
                     http_tool_name.clone(),
                     http_tool_description.clone(),
+                    http_edit_tool_name.clone(),
+                    http_edit_tool_description.clone(),
+                    http_edit_image_enabled,
                 )
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             };

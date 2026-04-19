@@ -92,6 +92,16 @@ pub struct MockToolConfig {
     pub static_image_path: String,
     pub tool_name: Option<String>,
     pub tool_description: Option<String>,
+
+    /// Whether the optional `edit_image` tool is enabled in MCP responses.
+    #[serde(default)]
+    pub edit_image_enabled: Option<bool>,
+
+    /// Optional override name for the `edit_image` tool.
+    pub edit_tool_name: Option<String>,
+
+    /// Optional override description for the `edit_image` tool.
+    pub edit_tool_description: Option<String>,
 }
 
 /// GenAI-backed tool configuration
@@ -112,6 +122,16 @@ pub struct GenAiToolConfig {
     pub response_format: Option<String>,
     pub tool_name: Option<String>,
     pub tool_description: Option<String>,
+
+    /// Whether the optional `edit_image` tool is enabled in MCP responses.
+    #[serde(default)]
+    pub edit_image_enabled: Option<bool>,
+
+    /// Optional override name for the `edit_image` tool.
+    pub edit_tool_name: Option<String>,
+
+    /// Optional override description for the `edit_image` tool.
+    pub edit_tool_description: Option<String>,
 }
 
 impl GenAiToolConfig {
@@ -208,6 +228,9 @@ impl GenAiToolConfig {
             response_format: self.response_format,
             tool_name: self.tool_name,
             tool_description: self.tool_description,
+            edit_image_enabled: self.edit_image_enabled,
+            edit_tool_name: self.edit_tool_name,
+            edit_tool_description: self.edit_tool_description,
         })
     }
 
