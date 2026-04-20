@@ -54,4 +54,4 @@ env_logger = { version = "0.11", optional = true }
 toml = "0.8"
 base64 = "0.22"
 mime_guess = "2.0"
-genai = { version = "0.5.1-WIP", git = "https://github.com/EratoLab/rust-genai.git", rev = "d85950e5791dd8f863e751fc33cbbbbd4e768e49" }
+genai = { version = "0.6.0-beta.17-WIP", git = "https://github.com/EratoLab/rust-genai.git", rev = "102f18cb1f558fc1975bc413abc1bf206c75944a" }
