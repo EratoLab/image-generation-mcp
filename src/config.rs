@@ -535,6 +535,9 @@ mod tests {
                 response_format: None,
                 tool_name: None,
                 tool_description: None,
+                edit_image_enabled: None,
+                edit_tool_name: None,
+                edit_tool_description: None,
             }),
             metadata: MetadataConfig {
                 prefix: "chat.erato/".to_string(),
