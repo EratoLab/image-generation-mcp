@@ -5,16 +5,19 @@
 pub mod image_generation;
 
 // Re-export Params types for use by MCP layer
-pub use image_generation::ImageGenerationParams;
 pub use image_generation::ImageEditParams;
+pub use image_generation::ImageGenerationParams;
 
 use crate::error::Result;
+use base64::Engine;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Tool execution context
 pub struct ToolContext<'a> {
+    id_token_claims: Option<Value>,
+
     /// Phantom data to maintain lifetime
     _phantom: std::marker::PhantomData<&'a ()>,
 }
@@ -23,14 +26,170 @@ impl<'a> ToolContext<'a> {
     /// Create a new tool context
     pub fn new() -> Self {
         Self {
+            id_token_claims: None,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Create a tool context from an inbound Authorization bearer token.
+    pub fn from_bearer_token(bearer_token: Option<String>) -> Self {
+        Self {
+            id_token_claims: bearer_token
+                .as_deref()
+                .and_then(decode_jwt_claims_unverified),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Render supported header template variables against the inbound ID token.
+    ///
+    /// Supported variables follow Erato's chat-provider header context shape:
+    /// `{{id_token.claims.<claim_name>}}`.
+    pub fn render_header_template(&self, template: &str) -> String {
+        let mut rendered = String::with_capacity(template.len());
+        let mut remaining = template;
+
+        while let Some(start) = remaining.find("{{") {
+            let (prefix, after_start) = remaining.split_at(start);
+            rendered.push_str(prefix);
+
+            let after_start = &after_start[2..];
+            let Some(end) = after_start.find("}}") else {
+                rendered.push_str("{{");
+                rendered.push_str(after_start);
+                return rendered;
+            };
+
+            let expression = after_start[..end].trim();
+            if let Some(value) = self.resolve_template_expression(expression) {
+                rendered.push_str(&value);
+            } else if expression.starts_with("id_token.claims.") {
+                // Match Handlebars non-strict behavior for missing claims.
+            } else {
+                rendered.push_str("{{");
+                rendered.push_str(&after_start[..end]);
+                rendered.push_str("}}");
+            }
+
+            remaining = &after_start[(end + 2)..];
+        }
+
+        rendered.push_str(remaining);
+        rendered
+    }
+
+    fn resolve_template_expression(&self, expression: &str) -> Option<String> {
+        let path = expression.strip_prefix("id_token.claims.")?;
+        let claims = self.id_token_claims.as_ref()?;
+        claim_path_value(claims, path).map(json_value_to_header_value)
     }
 }
 
 impl<'a> Default for ToolContext<'a> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn decode_jwt_claims_unverified(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let mut padded_payload = payload.to_string();
+    while padded_payload.len() % 4 != 0 {
+        padded_payload.push('=');
+    }
+
+    let bytes = base64::engine::general_purpose::URL_SAFE
+        .decode(padded_payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn claim_path_value<'a>(claims: &'a Value, path: &str) -> Option<&'a Value> {
+    if let Some(path) = path.strip_prefix('[') {
+        let end = path.find(']')?;
+        let key = path[..end].trim_matches(|c| c == '"' || c == '\'');
+        let value = claims.get(key)?;
+        let rest = &path[(end + 1)..];
+        return match rest.strip_prefix('.') {
+            Some(rest) => dot_path_value(value, rest),
+            None if rest.is_empty() => Some(value),
+            None => None,
+        };
+    }
+
+    dot_path_value(claims, path)
+}
+
+fn dot_path_value<'a>(claims: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut value = claims;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        value = value.get(segment)?;
+    }
+    Some(value)
+}
+
+fn json_value_to_header_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+        Value::Null => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tool_context_tests {
+    use super::*;
+
+    fn jwt_with_claims(claims: Value) -> String {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("e30.{payload}.sig")
+    }
+
+    #[test]
+    fn renders_id_token_claim_from_bearer_token() {
+        let token = jwt_with_claims(serde_json::json!({
+            "oid": "user-123",
+            "email": "alice@example.com"
+        }));
+        let context = ToolContext::from_bearer_token(Some(token));
+
+        assert_eq!(
+            context.render_header_template("X-User={{id_token.claims.oid}}"),
+            "X-User=user-123"
+        );
+        assert_eq!(
+            context.render_header_template("{{id_token.claims.email}}"),
+            "alice@example.com"
+        );
+    }
+
+    #[test]
+    fn missing_id_token_claim_renders_empty() {
+        let token = jwt_with_claims(serde_json::json!({"sub": "subject-1"}));
+        let context = ToolContext::from_bearer_token(Some(token));
+
+        assert_eq!(
+            context.render_header_template("X-Missing={{id_token.claims.oid}}"),
+            "X-Missing="
+        );
+    }
+
+    #[test]
+    fn renders_bracketed_claim_name() {
+        let token = jwt_with_claims(serde_json::json!({
+            "https://example.com/user_id": "external-user-1"
+        }));
+        let context = ToolContext::from_bearer_token(Some(token));
+
+        assert_eq!(
+            context.render_header_template("{{id_token.claims.[https://example.com/user_id]}}"),
+            "external-user-1"
+        );
     }
 }
 
