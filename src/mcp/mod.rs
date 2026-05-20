@@ -6,6 +6,7 @@ pub mod handler;
 pub use handler::BrowserServer;
 
 use crate::tools::{self, Tool, ToolContext, ToolResult as InternalToolResult};
+use http::header::AUTHORIZATION;
 use rmcp::{
     ErrorData as McpError,
     handler::server::wrapper::Parameters,
@@ -26,6 +27,19 @@ fn build_meta_map(result: &InternalToolResult, prefix: &str) -> Option<Meta> {
         }
     }
     Some(Meta(meta_obj))
+}
+
+fn bearer_token_from_request_context(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+) -> Option<String> {
+    let parts = context.extensions.get::<http::request::Parts>()?;
+    let header = parts.headers.get(AUTHORIZATION)?.to_str().ok()?;
+    header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Convert internal ToolResult to MCP CallToolResult
@@ -74,8 +88,11 @@ macro_rules! register_mcp_tools {
                 async fn $mcp_name(
                     &self,
                     params: Parameters<<$tool_type as Tool>::Params>,
+                    request_context: rmcp::service::RequestContext<rmcp::RoleServer>,
                 ) -> Result<CallToolResult, McpError> {
-                    let mut context = ToolContext::new();
+                    let mut context = ToolContext::from_bearer_token(
+                        bearer_token_from_request_context(&request_context),
+                    );
                     let tool = <$tool_type>::default();
                     let result = tool.execute_typed(params.0, &mut context)
                         .await

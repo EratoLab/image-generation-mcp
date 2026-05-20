@@ -21,9 +21,7 @@ use base64::Engine;
 #[cfg(feature = "mcp-server")]
 use genai::adapter::AdapterKind;
 #[cfg(feature = "mcp-server")]
-use genai::chat::{
-    BinarySource, ContentPart, ImageRequest,
-};
+use genai::chat::{BinarySource, ContentPart, ImageRequest};
 #[cfg(feature = "mcp-server")]
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 #[cfg(feature = "mcp-server")]
@@ -150,7 +148,7 @@ impl Tool for ImageGenerationTool {
     async fn execute_typed(
         &self,
         params: Self::Params,
-        _context: &mut ToolContext<'_>,
+        context: &mut ToolContext<'_>,
     ) -> Result<ToolResult> {
         // Execute based on tool type
         #[cfg(feature = "mcp-server")]
@@ -168,7 +166,7 @@ impl Tool for ImageGenerationTool {
                     (result, token_usage)
                 }
                 ToolSection::GenAi(genai_config) => {
-                    self.execute_genai(&params, genai_config).await?
+                    self.execute_genai(&params, genai_config, context).await?
                 }
             }
         };
@@ -211,7 +209,7 @@ impl Tool for ImageEditTool {
     async fn execute_typed(
         &self,
         params: Self::Params,
-        _context: &mut ToolContext<'_>,
+        context: &mut ToolContext<'_>,
     ) -> Result<ToolResult> {
         #[cfg(feature = "mcp-server")]
         let (result, token_usage) = {
@@ -227,7 +225,9 @@ impl Tool for ImageEditTool {
                     };
                     (result, token_usage)
                 }
-                ToolSection::GenAi(genai_config) => self.execute_genai(&params, genai_config).await?,
+                ToolSection::GenAi(genai_config) => {
+                    self.execute_genai(&params, genai_config, context).await?
+                }
             }
         };
 
@@ -327,15 +327,19 @@ impl ImageGenerationTool {
     #[cfg(feature = "mcp-server")]
     fn build_custom_http_client(
         config: &crate::config::GenAiToolConfig,
+        context: Option<&ToolContext<'_>>,
     ) -> Result<reqwest::Client> {
         let request_headers = config.additional_request_headers_map();
 
         let mut header_map = HeaderMap::new();
         for (key, value) in request_headers {
+            let rendered_value = context
+                .map(|context| context.render_header_template(&value))
+                .unwrap_or(value);
             let name = HeaderName::from_str(&key).map_err(|e| {
                 BrowserError::ConfigError(format!("Invalid header name '{}': {}", key, e))
             })?;
-            let value = HeaderValue::from_str(&value).map_err(|e| {
+            let value = HeaderValue::from_str(&rendered_value).map_err(|e| {
                 BrowserError::ConfigError(format!("Invalid header value for '{}': {}", key, e))
             })?;
             header_map.insert(name, value);
@@ -534,12 +538,15 @@ impl ImageGenerationTool {
         &self,
         params: &ImageGenerationParams,
         genai_config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
     ) -> Result<(ToolResult, TokenUsage)> {
         if Self::is_gemini_provider(genai_config) {
-            return self.execute_vertex_gemini(params, genai_config).await;
+            return self
+                .execute_vertex_gemini(params, genai_config, context)
+                .await;
         }
 
-        let client = Self::build_genai_client(genai_config)?;
+        let client = Self::build_genai_client(genai_config, context)?;
 
         let width = params.width.unwrap_or(1024);
         let height = params.height.unwrap_or(1024);
@@ -658,6 +665,7 @@ impl ImageGenerationTool {
         &self,
         params: &ImageGenerationParams,
         genai_config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
     ) -> Result<(ToolResult, TokenUsage)> {
         let width = params.width.unwrap_or(1024);
         let height = params.height.unwrap_or(1024);
@@ -737,7 +745,7 @@ impl ImageGenerationTool {
             }
         });
 
-        let client = Self::build_custom_http_client(genai_config)?;
+        let client = Self::build_custom_http_client(genai_config, Some(context))?;
         let response = client
             .post(request_url)
             .json(&request_body)
@@ -857,10 +865,13 @@ impl ImageGenerationTool {
     }
 
     #[cfg(feature = "mcp-server")]
-    fn build_genai_client(config: &crate::config::GenAiToolConfig) -> Result<GenaiClient> {
+    fn build_genai_client(
+        config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
+    ) -> Result<GenaiClient> {
         let base_url = config.base_url.clone();
         let request_params = config.additional_request_parameters_map();
-        let custom_client = Self::build_custom_http_client(config)?;
+        let custom_client = Self::build_custom_http_client(config, Some(context))?;
 
         let provider_kind = config.provider_kind.clone();
         let model_name = config.model_name.clone();
@@ -966,7 +977,10 @@ impl ImageEditTool {
             "image/jpeg".to_string()
         } else if configured == "webp" {
             "image/webp".to_string()
-        } else if configured == "image/jpeg" || configured == "image/webp" || configured == "image/png" {
+        } else if configured == "image/jpeg"
+            || configured == "image/webp"
+            || configured == "image/png"
+        {
             configured
         } else {
             "image/png".to_string()
@@ -975,7 +989,11 @@ impl ImageEditTool {
 
     fn image_input_part(params: &ImageEditParams) -> Result<Value> {
         let image_mime = Self::sanitize_image_mime_type(params);
-        if let Some(uri) = params.image_uri.as_ref().filter(|uri| !uri.trim().is_empty()) {
+        if let Some(uri) = params
+            .image_uri
+            .as_ref()
+            .filter(|uri| !uri.trim().is_empty())
+        {
             return Ok(json!({
                 "file_data": {
                     "mime_type": image_mime,
@@ -984,7 +1002,11 @@ impl ImageEditTool {
             }));
         }
 
-        if let Some(image_data_base64) = params.image_data_base64.as_ref().filter(|data| !data.trim().is_empty()) {
+        if let Some(image_data_base64) = params
+            .image_data_base64
+            .as_ref()
+            .filter(|data| !data.trim().is_empty())
+        {
             return Ok(json!({
                 "inline_data": {
                     "mime_type": image_mime,
@@ -1018,9 +1040,12 @@ impl ImageEditTool {
         &self,
         params: &ImageEditParams,
         genai_config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
     ) -> Result<(ToolResult, TokenUsage)> {
         if Self::is_gemini_provider(genai_config) {
-            return self.execute_vertex_gemini(params, genai_config).await;
+            return self
+                .execute_vertex_gemini(params, genai_config, context)
+                .await;
         }
 
         let reason = format!(
@@ -1034,16 +1059,14 @@ impl ImageEditTool {
             model_identifier: genai_config.model_name.clone(),
         };
 
-        Ok((
-            ToolResult::failure(reason),
-            token_usage,
-        ))
+        Ok((ToolResult::failure(reason), token_usage))
     }
 
     async fn execute_vertex_gemini(
         &self,
         params: &ImageEditParams,
         genai_config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
     ) -> Result<(ToolResult, TokenUsage)> {
         let width = params.width.unwrap_or(1024);
         let height = params.height.unwrap_or(1024);
@@ -1131,7 +1154,7 @@ impl ImageEditTool {
             }
         });
 
-        let client = ImageGenerationTool::build_custom_http_client(genai_config)?;
+        let client = ImageGenerationTool::build_custom_http_client(genai_config, Some(context))?;
         let response = client
             .post(request_url)
             .json(&request_body)
@@ -1148,7 +1171,10 @@ impl ImageEditTool {
             .await
             .map_err(|e| BrowserError::ToolExecutionFailed {
                 tool: self.name().to_string(),
-                reason: format!("Failed to read Gemini/Vertex image edit response body: {}", e),
+                reason: format!(
+                    "Failed to read Gemini/Vertex image edit response body: {}",
+                    e
+                ),
             })?;
 
         if !status.is_success() {
@@ -1182,7 +1208,10 @@ impl ImageEditTool {
         let payload: Value =
             serde_json::from_str(&body_text).map_err(|e| BrowserError::ToolExecutionFailed {
                 tool: self.name().to_string(),
-                reason: format!("Failed to parse Gemini/Vertex image edit response JSON: {}", e),
+                reason: format!(
+                    "Failed to parse Gemini/Vertex image edit response JSON: {}",
+                    e
+                ),
             })?;
 
         let mut images = Vec::new();

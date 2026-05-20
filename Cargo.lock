@@ -1065,6 +1065,7 @@ dependencies = [
  "clap",
  "env_logger",
  "genai",
+ "http",
  "log",
  "mime_guess",
  "reqwest",
