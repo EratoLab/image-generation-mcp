@@ -188,7 +188,7 @@ Edit an image from one input source and a prompt.
 
 **Parameters:**
 - `prompt` (string, required): Editing prompt
-- `image_uri` (string, optional): URI of the source image (`file_data` payload)
+- `image_uri` (string, optional): Source image file field. In Erato, this is presented to the model as an `erato-file://...` URI and resolved to base64 before the MCP call; direct callers may provide an HTTP(S) URL or data URI.
 - `image_data_base64` (string, optional): Source image base64 payload (`inline_data`)
 - `image_mime_type` (string, optional): MIME type of source image (defaults to `image/png`)
 - `width` (integer, optional): Target width [default: 1024]
@@ -201,6 +201,11 @@ Edit an image from one input source and a prompt.
   - `width` (integer): Requested width in pixels
   - `height` (integer): Requested height in pixels
   - `mime_type` (string): MIME type (e.g., `image/png`)
+
+For the OpenAI provider, editing uses the provider's multipart image-edit endpoint. The source
+can be supplied as raw base64, a base64 data URI, or an HTTP(S) image URI. Keep
+`response_format = "b64_json"` (the default) so the result matches the tool's base64 output
+schema. GPT Image models additionally accept `png`, `jpeg`, or `webp` as output formats.
 
 **Token Usage Metadata:**
 
@@ -220,11 +225,17 @@ If a provider blocks image generation due to content policy, the tool returns a 
 
 ```json
 {
-  "type": "content_filter",
-  "error_description": "The request was filtered by content policy.",
-  "filter_details": { }
+  "error": "Generation request blocked by content filter.",
+  "data": {
+    "type": "content_filter",
+    "error_description": "The request was filtered by content policy.",
+    "filter_details": { }
+  }
 }
 ```
+
+All MCP tool errors use this JSON envelope. Errors without provider details contain only the
+`error` field; errors with structured provider details include them under `data`.
 
 **Example Request:**
 

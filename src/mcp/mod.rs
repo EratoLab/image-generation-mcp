@@ -62,16 +62,18 @@ fn convert_result(result: InternalToolResult, prefix: &str) -> Result<CallToolRe
         })
     } else {
         let error_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        let (text, structured_content) = if let Some(data) = result.data {
-            let text = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
-            (text, Some(data))
-        } else {
-            (error_msg, None)
-        };
+        let mut error_payload = serde_json::Map::new();
+        error_payload.insert("error".to_string(), serde_json::Value::String(error_msg));
+        if let Some(data) = result.data {
+            error_payload.insert("data".to_string(), data);
+        }
+        let error_payload = serde_json::Value::Object(error_payload);
+        let text = serde_json::to_string_pretty(&error_payload)
+            .unwrap_or_else(|_| "{\"error\":\"Failed to serialize tool error\"}".to_string());
 
         Ok(CallToolResult {
             content: vec![Content::text(text)],
-            structured_content,
+            structured_content: Some(error_payload),
             is_error: Some(true),
             meta: meta_map,
         })
@@ -94,9 +96,10 @@ macro_rules! register_mcp_tools {
                         bearer_token_from_request_context(&request_context),
                     );
                     let tool = <$tool_type>::default();
-                    let result = tool.execute_typed(params.0, &mut context)
-                        .await
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    let result = match tool.execute_typed(params.0, &mut context).await {
+                        Ok(result) => result,
+                        Err(error) => InternalToolResult::failure(error.to_string()),
+                    };
 
                     // Get metadata prefix from global config
                     let config = crate::config::get_global_config().await;
@@ -141,9 +144,47 @@ mod tests {
         assert_eq!(
             converted.structured_content,
             Some(serde_json::json!({
-                "type": "content_filter",
-                "error_description": "blocked by policy"
+                "error": "blocked",
+                "data": {
+                    "type": "content_filter",
+                    "error_description": "blocked by policy"
+                }
             }))
+        );
+
+        let text = converted.content[0]
+            .as_text()
+            .expect("error content should be text");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text.text)
+                .expect("error content should be JSON"),
+            serde_json::json!({
+                "error": "blocked",
+                "data": {
+                    "type": "content_filter",
+                    "error_description": "blocked by policy"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn convert_result_wraps_plain_errors_as_json() {
+        let converted = convert_result(InternalToolResult::failure("source image not found"), "")
+            .expect("conversion should return MCP tool result");
+
+        assert_eq!(converted.is_error, Some(true));
+        assert_eq!(
+            converted.structured_content,
+            Some(serde_json::json!({"error": "source image not found"}))
+        );
+        let text = converted.content[0]
+            .as_text()
+            .expect("error content should be text");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text.text)
+                .expect("error content should be JSON"),
+            serde_json::json!({"error": "source image not found"})
         );
     }
 }

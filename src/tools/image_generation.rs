@@ -33,6 +33,8 @@ use reqwest::Url;
 #[cfg(feature = "mcp-server")]
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(feature = "mcp-server")]
+use reqwest::multipart::{Form, Part};
+#[cfg(feature = "mcp-server")]
 use std::path::Path;
 #[cfg(feature = "mcp-server")]
 use std::str::FromStr;
@@ -40,10 +42,16 @@ use std::str::FromStr;
 /// Parameters for image editing
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageEditParams {
-    /// Source image as a URI/data URI.
+    /// Source image content. Erato supplies an erato-file URI to the model and resolves it to
+    /// base64 before invoking the MCP server; direct callers may also provide an HTTP(S) URL or
+    /// data URI.
+    #[schemars(extend(
+        "contentEncoding" = "base64",
+        "chat.erato/file_content_field" = true
+    ))]
     pub image_uri: Option<String>,
 
-    /// Source image as raw base64 payload (no data URI prefix).
+    /// Source image as raw base64 payload (no data URI prefix), retained for direct callers.
     #[schemars(extend(
         "contentEncoding" = "base64",
         "chat.erato/file_content_field" = true
@@ -357,6 +365,8 @@ impl ImageGenerationTool {
         message.contains("content rejected")
             || message.contains("content filter")
             || message.contains("content policy")
+            || message.contains("content_policy_violation")
+            || message.contains("safety system")
             || message.contains("sexual content detection")
             || message.contains("violence detection")
             || message.contains("hate detection")
@@ -418,7 +428,9 @@ impl ImageGenerationTool {
                 .unwrap_or_default();
 
             let is_content_filter = error_type == Some("content_filter")
+                || error_type == Some("content_policy_violation")
                 || error_code == Some("content_filter")
+                || error_code == Some("content_policy_violation")
                 || Self::message_indicates_content_filter(message);
 
             if !is_content_filter {
@@ -1048,18 +1060,405 @@ impl ImageEditTool {
                 .await;
         }
 
-        let reason = format!(
-            "Image editing is not yet implemented for provider '{}'; supported providers: gemini/vertex_ai (via generateContent).",
-            genai_config.provider_kind
-        );
-        let token_usage = TokenUsage {
-            total_prompt_tokens: 0,
-            total_completion_tokens: 0,
-            total_tokens: 0,
-            model_identifier: genai_config.model_name.clone(),
-        };
+        if genai_config.provider_kind != "openai" {
+            let reason = format!(
+                "Image editing is not supported for provider '{}'; supported providers: openai, gemini/vertex_ai.",
+                genai_config.provider_kind
+            );
+            let token_usage = TokenUsage {
+                total_prompt_tokens: 0,
+                total_completion_tokens: 0,
+                total_tokens: 0,
+                model_identifier: genai_config.model_name.clone(),
+            };
+            return Ok((ToolResult::failure(reason), token_usage));
+        }
 
-        Ok((ToolResult::failure(reason), token_usage))
+        self.execute_openai(params, genai_config, context).await
+    }
+
+    async fn execute_openai(
+        &self,
+        params: &ImageEditParams,
+        genai_config: &crate::config::GenAiToolConfig,
+        context: &ToolContext<'_>,
+    ) -> Result<(ToolResult, TokenUsage)> {
+        let width = params.width.unwrap_or(1024);
+        let height = params.height.unwrap_or(1024);
+        let num_images = params.num_images.unwrap_or(1);
+
+        if params.prompt.trim().is_empty() {
+            return Err(BrowserError::InvalidArgument(
+                "prompt is required for image editing".to_string(),
+            ));
+        }
+        if width == 0 || height == 0 {
+            return Err(BrowserError::InvalidArgument(
+                "width and height must be greater than zero".to_string(),
+            ));
+        }
+        if num_images == 0 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images must be at least 1".to_string(),
+            ));
+        }
+        if num_images > i32::MAX as u32 {
+            return Err(BrowserError::InvalidArgument(
+                "num_images is too large".to_string(),
+            ));
+        }
+
+        let (image_bytes, image_mime_type) = Self::load_image_source(params).await?;
+        let image_extension = match image_mime_type.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let image_part = Part::bytes(image_bytes)
+            .file_name(format!("source.{image_extension}"))
+            .mime_str(&image_mime_type)
+            .map_err(|e| {
+                BrowserError::InvalidArgument(format!(
+                    "Invalid source image MIME type '{}': {}",
+                    image_mime_type, e
+                ))
+            })?;
+
+        let mut form = Form::new()
+            .text("model", genai_config.model_name.clone())
+            .text("prompt", params.prompt.clone())
+            .text("n", num_images.to_string())
+            .text("size", format!("{width}x{height}"))
+            .part("image", image_part);
+
+        if genai_config.model_name.starts_with("gpt-image-") {
+            if let Some(output_format) = Self::openai_output_format(genai_config) {
+                form = form.text("output_format", output_format);
+            }
+        } else {
+            form = form.text(
+                "response_format",
+                Self::openai_response_format(genai_config)?,
+            );
+        }
+
+        if genai_config.model_name.starts_with("gpt-image-") {
+            if let Some(quality) = genai_config
+                .image_quality
+                .as_deref()
+                .filter(|quality| matches!(quality.trim(), "low" | "medium" | "high" | "auto"))
+            {
+                form = form.text("quality", quality.trim().to_string());
+            }
+        }
+
+        let request_url = Self::openai_edit_url(genai_config)?;
+        let client = ImageGenerationTool::build_custom_http_client(genai_config, Some(context))?;
+        let mut request = client.post(request_url).multipart(form);
+        if let Some(api_key) = &genai_config.api_key {
+            request = request.bearer_auth(api_key);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("OpenAI image edit request failed: {}", e),
+            })?;
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to read OpenAI image edit response body: {}", e),
+            })?;
+
+        if !status.is_success() {
+            if let Some(content_filter_error) =
+                ImageGenerationTool::parse_content_filter_error_from_body(&body_text)
+            {
+                let result = ToolResult::failure_with_data(
+                    "Image edit request blocked by content filter.",
+                    content_filter_error,
+                );
+                let token_usage = TokenUsage {
+                    total_prompt_tokens: 0,
+                    total_completion_tokens: 0,
+                    total_tokens: 0,
+                    model_identifier: genai_config.model_name.clone(),
+                };
+                return Ok((result, token_usage));
+            }
+
+            let reason = if body_text.is_empty() {
+                format!("OpenAI API returned HTTP {}", status)
+            } else {
+                format!("OpenAI API returned HTTP {}: {}", status, body_text)
+            };
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason,
+            });
+        }
+
+        let payload: Value =
+            serde_json::from_str(&body_text).map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("Failed to parse OpenAI image edit response JSON: {}", e),
+            })?;
+        let output_mime_type = Self::openai_output_mime_type(genai_config);
+        let mut images = Vec::new();
+        if let Some(data) = payload.get("data").and_then(Value::as_array) {
+            for item in data {
+                if let Some(data_base64) = item.get("b64_json").and_then(Value::as_str) {
+                    images.push(GeneratedImage {
+                        data_base64: data_base64.to_string(),
+                        width,
+                        height,
+                        mime_type: output_mime_type.clone(),
+                    });
+                }
+            }
+        }
+
+        if images.is_empty() {
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!(
+                    "OpenAI image edit returned no base64 image data. Set response_format='b64_json'. Response payload: {}",
+                    payload
+                ),
+            });
+        }
+
+        let token_usage = Self::map_usage_from_openai(&payload, genai_config.model_name.clone());
+        Ok((
+            ToolResult::success_with(ImageGenerationResponse { images }),
+            token_usage,
+        ))
+    }
+
+    fn openai_edit_url(config: &crate::config::GenAiToolConfig) -> Result<Url> {
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1/");
+        let mut base_url = Url::parse(base_url).map_err(|e| {
+            BrowserError::ConfigError(format!("Invalid OpenAI base_url '{}': {}", base_url, e))
+        })?;
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
+        let mut request_url = base_url.join("images/edits").map_err(|e| {
+            BrowserError::ConfigError(format!("Invalid OpenAI image edit URL: {}", e))
+        })?;
+        {
+            let mut query = request_url.query_pairs_mut();
+            for (key, value) in config.additional_request_parameters_map() {
+                query.append_pair(&key, &value);
+            }
+        }
+        Ok(request_url)
+    }
+
+    fn openai_response_format(config: &crate::config::GenAiToolConfig) -> Result<&'static str> {
+        match config
+            .response_format
+            .as_deref()
+            .unwrap_or("b64_json")
+            .trim()
+        {
+            "b64_json" => Ok("b64_json"),
+            "url" => Ok("url"),
+            value => Err(BrowserError::ConfigError(format!(
+                "OpenAI image editing only supports response_format='b64_json' or 'url', got '{}'",
+                value
+            ))),
+        }
+    }
+
+    fn openai_output_format(config: &crate::config::GenAiToolConfig) -> Option<String> {
+        match config
+            .response_format
+            .as_deref()?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "png" | "jpeg" | "webp" => Some(
+                config
+                    .response_format
+                    .as_deref()
+                    .unwrap()
+                    .trim()
+                    .to_ascii_lowercase(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn openai_output_mime_type(config: &crate::config::GenAiToolConfig) -> String {
+        match config
+            .response_format
+            .as_deref()
+            .unwrap_or("png")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "jpeg" | "jpg" => "image/jpeg".to_string(),
+            "webp" => "image/webp".to_string(),
+            _ => "image/png".to_string(),
+        }
+    }
+
+    async fn load_image_source(params: &ImageEditParams) -> Result<(Vec<u8>, String)> {
+        let configured_mime_type = Self::sanitize_image_mime_type(params);
+
+        if let Some(image_data) = params
+            .image_data_base64
+            .as_deref()
+            .filter(|data| !data.trim().is_empty())
+        {
+            return Self::decode_image_data(image_data, configured_mime_type);
+        }
+
+        let image_uri = params
+            .image_uri
+            .as_deref()
+            .filter(|uri| !uri.trim().is_empty())
+            .ok_or_else(|| {
+                BrowserError::InvalidArgument(
+                    "Either image_uri or image_data_base64 must be provided".to_string(),
+                )
+            })?
+            .trim();
+
+        if image_uri.starts_with("data:") {
+            return Self::decode_image_data(
+                image_uri,
+                if params
+                    .image_mime_type
+                    .as_deref()
+                    .is_some_and(|mime| !mime.trim().is_empty())
+                {
+                    configured_mime_type
+                } else {
+                    image_uri
+                        .strip_prefix("data:")
+                        .and_then(|value| value.split_once(';'))
+                        .map(|(mime_type, _)| mime_type.to_string())
+                        .unwrap_or_else(|| "image/png".to_string())
+                },
+            );
+        }
+
+        if !image_uri.starts_with("http://") && !image_uri.starts_with("https://") {
+            // Erato resolves annotated erato-file inputs to base64 before invoking the server.
+            // Attempting base64 decoding here also supports that resolved value in image_uri.
+            return Self::decode_image_data(image_uri, configured_mime_type);
+        }
+
+        let source_url = Url::parse(image_uri).map_err(|e| {
+            BrowserError::InvalidArgument(format!("Invalid image_uri '{}': {}", image_uri, e))
+        })?;
+        if !matches!(source_url.scheme(), "http" | "https") {
+            return Err(BrowserError::InvalidArgument(
+                "image_uri must be an http(s) URL or a data URI for OpenAI image editing"
+                    .to_string(),
+            ));
+        }
+
+        let response = reqwest::get(source_url.clone()).await.map_err(|e| {
+            BrowserError::ToolExecutionFailed {
+                tool: "edit_image".to_string(),
+                reason: format!("Failed to download source image '{}': {}", source_url, e),
+            }
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BrowserError::ToolExecutionFailed {
+                tool: "edit_image".to_string(),
+                reason: format!("Source image URL returned HTTP {}", status),
+            });
+        }
+        let response_mime_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .filter(|value| value.starts_with("image/"))
+            .map(ToOwned::to_owned)
+            .unwrap_or(configured_mime_type);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| BrowserError::ToolExecutionFailed {
+                tool: "edit_image".to_string(),
+                reason: format!("Failed to read source image '{}': {}", source_url, e),
+            })?;
+        Ok((bytes.to_vec(), response_mime_type))
+    }
+
+    fn decode_image_data(data: &str, mime_type: String) -> Result<(Vec<u8>, String)> {
+        let encoded = if let Some(data_uri) = data.strip_prefix("data:") {
+            let (metadata, encoded) = data_uri.split_once(',').ok_or_else(|| {
+                BrowserError::InvalidArgument("Invalid image data URI".to_string())
+            })?;
+            if !metadata.split(';').any(|part| part == "base64") {
+                return Err(BrowserError::InvalidArgument(
+                    "Image data URI must contain base64-encoded data".to_string(),
+                ));
+            }
+            encoded
+        } else {
+            data.strip_prefix("base64,").unwrap_or(data)
+        }
+        .trim();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| {
+                BrowserError::InvalidArgument(format!("Invalid base64 source image: {}", e))
+            })?;
+        Ok((bytes, mime_type))
+    }
+
+    fn map_usage_from_openai(payload: &Value, model_identifier: String) -> TokenUsage {
+        let usage = payload.get("usage");
+        let prompt_tokens = usage
+            .and_then(|value| {
+                value
+                    .get("prompt_tokens")
+                    .or_else(|| value.get("input_tokens"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .and_then(|value| {
+                value
+                    .get("completion_tokens")
+                    .or_else(|| value.get("output_tokens"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let total_tokens = usage
+            .and_then(|value| value.get("total_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(prompt_tokens + completion_tokens);
+
+        TokenUsage {
+            total_prompt_tokens: prompt_tokens,
+            total_completion_tokens: completion_tokens,
+            total_tokens,
+            model_identifier: payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(&model_identifier)
+                .to_string(),
+        }
     }
 
     async fn execute_vertex_gemini(
@@ -1361,6 +1760,138 @@ mod tests {
         assert_eq!(usage.total_completion_tokens, 7);
         assert_eq!(usage.total_tokens, 18);
         assert_eq!(usage.model_identifier, "gemini-x");
+    }
+
+    #[cfg(feature = "mcp-server")]
+    fn openai_test_config(
+        model_name: &str,
+        base_url: Option<&str>,
+        response_format: Option<&str>,
+    ) -> crate::config::GenAiToolConfig {
+        crate::config::GenAiToolConfig {
+            provider_kind: "openai".to_string(),
+            model_name: model_name.to_string(),
+            model_display_name: None,
+            base_url: base_url.map(ToOwned::to_owned),
+            region: None,
+            api_key: Some("test-key".to_string()),
+            api_version: None,
+            additional_request_parameters: None,
+            additional_request_headers: None,
+            image_quality: None,
+            image_style: None,
+            response_format: response_format.map(ToOwned::to_owned),
+            tool_name: None,
+            tool_description: None,
+            edit_image_enabled: Some(true),
+            edit_tool_name: None,
+            edit_tool_description: None,
+        }
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[test]
+    fn openai_edit_url_uses_images_edits_and_preserves_query_parameters() {
+        let mut config = openai_test_config(
+            "gpt-image-1",
+            Some("https://example.test/v1"),
+            Some("b64_json"),
+        );
+        config.additional_request_parameters = Some(vec!["api-version=2025-04-01".to_string()]);
+
+        let url = ImageEditTool::openai_edit_url(&config).expect("valid edit URL");
+        assert_eq!(
+            url.as_str(),
+            "https://example.test/v1/images/edits?api-version=2025-04-01"
+        );
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[test]
+    fn openai_edit_helpers_map_formats_and_usage() {
+        let config = openai_test_config("gpt-image-1", None, Some("jpeg"));
+        assert_eq!(
+            ImageEditTool::openai_output_format(&config).as_deref(),
+            Some("jpeg")
+        );
+        assert_eq!(
+            ImageEditTool::openai_output_mime_type(&config),
+            "image/jpeg"
+        );
+
+        let legacy_config = openai_test_config("dall-e-2", None, Some("b64_json"));
+        assert_eq!(
+            ImageEditTool::openai_response_format(&legacy_config).unwrap(),
+            "b64_json"
+        );
+
+        let payload = json!({
+            "model": "gpt-image-1",
+            "usage": {
+                "input_tokens": 23,
+                "output_tokens": 41,
+                "total_tokens": 64
+            }
+        });
+        let usage = ImageEditTool::map_usage_from_openai(&payload, "configured-model".to_string());
+        assert_eq!(usage.total_prompt_tokens, 23);
+        assert_eq!(usage.total_completion_tokens, 41);
+        assert_eq!(usage.total_tokens, 64);
+        assert_eq!(usage.model_identifier, "gpt-image-1");
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[tokio::test]
+    async fn openai_image_source_decodes_data_uri() {
+        let params = ImageEditParams {
+            image_uri: Some("data:image/jpeg;base64,AAE=".to_string()),
+            image_data_base64: None,
+            image_mime_type: None,
+            prompt: "edit".to_string(),
+            width: None,
+            height: None,
+            num_images: None,
+        };
+
+        let (bytes, mime_type) = ImageEditTool::load_image_source(&params)
+            .await
+            .expect("valid data URI");
+        assert_eq!(bytes, vec![0, 1]);
+        assert_eq!(mime_type, "image/jpeg");
+
+        let params = ImageEditParams {
+            image_uri: None,
+            image_data_base64: Some("data:image/png;base64,AAE=".to_string()),
+            image_mime_type: Some("image/png".to_string()),
+            prompt: "edit".to_string(),
+            width: None,
+            height: None,
+            num_images: None,
+        };
+        let (bytes, mime_type) = ImageEditTool::load_image_source(&params)
+            .await
+            .expect("data URI in image_data_base64 is supported");
+        assert_eq!(bytes, vec![0, 1]);
+        assert_eq!(mime_type, "image/png");
+    }
+
+    #[test]
+    fn image_edit_schema_marks_input_and_output_file_fields() {
+        let schema = serde_json::to_value(schemars::schema_for!(ImageEditParams))
+            .expect("schema should serialize");
+        for field in ["image_uri", "image_data_base64"] {
+            let property = &schema["properties"][field];
+            assert_eq!(property["contentEncoding"], "base64");
+            assert_eq!(property["chat.erato/file_content_field"], true);
+        }
+
+        let output_schema = serde_json::to_value(schemars::schema_for!(ImageGenerationResponse))
+            .expect("schema should serialize");
+        let image = &output_schema["$defs"]["GeneratedImage"];
+        let data_base64 = &image["properties"]["data_base64"];
+        assert_eq!(data_base64["contentEncoding"], "base64");
+        assert_eq!(data_base64["chat.erato/file_content_field"], true);
+        assert!(image["properties"]["mime_type"].is_object());
     }
 
     // Note: Integration tests requiring tokio are in the binary's test suite
