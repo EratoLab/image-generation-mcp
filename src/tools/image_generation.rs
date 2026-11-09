@@ -579,11 +579,18 @@ impl ImageGenerationTool {
         if let Some(style) = &genai_config.image_style {
             image_request = image_request.with_style(style.clone());
         }
-        let response_format = genai_config
-            .response_format
-            .clone()
-            .unwrap_or_else(|| "b64_json".to_string());
-        image_request = image_request.with_response_format(response_format);
+        // GPT Image returns base64 by default and rejects response_format.
+        // Match the OpenAI editing path; legacy models still need b64_json
+        // because this MCP server returns inline image content, not URLs.
+        if genai_config.provider_kind != "openai"
+            || !genai_config.model_name.starts_with("gpt-image-")
+        {
+            let response_format = genai_config
+                .response_format
+                .clone()
+                .unwrap_or_else(|| "b64_json".to_string());
+            image_request = image_request.with_response_format(response_format);
+        }
 
         let image_response = match client
             .exec_image_generation(&genai_config.model_name, image_request, None)
@@ -1787,6 +1794,83 @@ mod tests {
             edit_tool_name: None,
             edit_tool_description: None,
         }
+    }
+
+    #[cfg(feature = "mcp-server")]
+    async fn check_generation_request(model: &str, response_format: Option<&str>) {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(None));
+        let capture = captured.clone();
+        let app = Router::new().route(
+            "/openai/v1/images/generations",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                *capture.lock().unwrap() = Some((headers, body.clone()));
+                if body["model"].as_str().unwrap().starts_with("gpt-image-")
+                    && body.get("response_format").is_some()
+                {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({"error": {"message": "Unknown parameter: 'response_format'."}})),
+                    );
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({"created": 1, "data": [{"b64_json": "AAE="}]})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/openai/v1/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = openai_test_config(model, Some(&base_url), response_format);
+        config.api_key = None;
+        config.additional_request_headers = Some(vec!["api-key=test-azure-key".to_string()]);
+        let params = ImageGenerationParams {
+            prompt: "A test image".to_string(),
+            width: Some(1024),
+            height: Some(1024),
+            num_images: Some(1),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ImageGenerationTool.execute_genai(&params, &config, &ToolContext::new()),
+        )
+        .await;
+        server.abort();
+        let (headers, body) = captured.lock().unwrap().take().expect("provider request");
+        assert_eq!(headers["api-key"], "test-azure-key");
+        assert_eq!(body["model"], model);
+        assert_eq!(body["size"], "1024x1024");
+        if model.starts_with("gpt-image-") {
+            assert!(
+                body.get("response_format").is_none(),
+                "unsupported parameter: {body}"
+            );
+        } else {
+            assert_eq!(body["response_format"], "b64_json");
+        }
+        let (output, _) = result
+            .expect("request completes")
+            .expect("generation succeeds");
+        assert!(output.success);
+        assert_eq!(output.data.unwrap()["images"][0]["data_base64"], "AAE=");
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[tokio::test]
+    async fn gpt_image_generation_omits_response_format() {
+        // Cover both defaulting and the deployed explicit b64_json setting.
+        check_generation_request("gpt-image-2.5-flare", None).await;
+        check_generation_request("gpt-image-2.5-flare", Some("b64_json")).await;
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[tokio::test]
+    async fn legacy_image_generation_keeps_base64_response_format() {
+        check_generation_request("dall-e-3", None).await;
+        check_generation_request("dall-e-3", Some("b64_json")).await;
     }
 
     #[cfg(feature = "mcp-server")]
