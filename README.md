@@ -146,6 +146,12 @@ tool_name = "generate_image"
 tool_description = "Generate an image from a text prompt"
 ```
 
+For OpenAI-compatible `gpt-image-*` models, image generation omits the
+`response_format` API parameter because these models return base64 images by
+default and reject that parameter. An existing `response_format = "b64_json"`
+configuration remains usable. Other models retain the configured response
+format, defaulting to `b64_json`.
+
 Gemini / Vertex AI example:
 
 ```toml
